@@ -184,11 +184,11 @@ AC_SUBST(PTHREAD_CFLAGS)
 AC_SUBST(PTHREAD_LIBS)
 
 my_save_cflags="$CFLAGS"
-CFLAGS="-fstack-protector-all -Wstack-protector"
+CFLAGS="-Wstack-protector"
 AC_MSG_CHECKING([whether CC supports -fstack-protector-all -Wstack-protector])
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([])],
     [AC_MSG_RESULT([yes])]
-    [AM_CFLAGS="-fstack-protector-all -Wstack-protector"],
+    [AM_CFLAGS="-Wstack-protector"],
     [AC_MSG_RESULT([no])]
 )
 CFLAGS="$my_save_cflags"
