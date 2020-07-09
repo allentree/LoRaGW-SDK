@@ -1,13 +1,14 @@
 #!/bin/bash
 
 #set up vendor platform toolchain's path and host
-export PATH=$(pwd)/toolchain/gcc-linaro-arm-linux-gnueabihf-4.9-2014.09_linux/bin:$PATH
-export BUILDHOST=arm-linux-gnueabihf
+export PATH=/home/zhangyi/mt7628_openwrt_develop/1_master_branch/client_openwrt/staging_dir/toolchain-mipsel_24kec+dsp_gcc-4.8-linaro_uClibc-0.9.33.2/bin:$PATH
+export BUILDHOST=mipsel-openwrt-linux-uclibc
+export STAGING_DIR=/home/zhangyi/mt7628_openwrt_develop/1_master_branch/client_openwrt/staging_dir
 
 #setup cpu arch
-export board_arch=armv7a
+#export board_arch=armv7a
 #export board_arch=mips
-#export board_arch=mipsel
+export board_arch=mipsel
 #export board_arch=armv8
 
 #set up build dir, general vendor no need modify
