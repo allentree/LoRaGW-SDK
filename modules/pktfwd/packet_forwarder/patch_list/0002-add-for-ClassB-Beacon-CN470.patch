@@ -1,0 +1,182 @@
+From 0ddc54d97b6799dc9b65e1f3af331d99a8d0ec63 Mon Sep 17 00:00:00 2001
+Date: Thu, 10 May 2018 19:54:49 +0800
+Subject: [PATCH 2/7] add for ClassB Beacon CN470
+
+---
+ lora_pkt_fwd/global_conf.json   | 15 +++++++--
+ lora_pkt_fwd/inc/trace.h        |  2 +-
+ lora_pkt_fwd/src/lora_pkt_fwd.c | 70 ++++++++++++++++++++++++++++++++++++-----
+ 3 files changed, 76 insertions(+), 11 deletions(-)
+ mode change 100644 => 100755 lora_pkt_fwd/global_conf.json
+ mode change 100644 => 100755 lora_pkt_fwd/inc/trace.h
+
+diff --git a/lora_pkt_fwd/global_conf.json b/lora_pkt_fwd/global_conf.json
+old mode 100644
+new mode 100755
+index 2d0948c..f72a44e
+--- a/lora_pkt_fwd/global_conf.json
++++ b/lora_pkt_fwd/global_conf.json
+@@ -169,7 +169,7 @@
+             /* TX gain table, index 10 */
+             "pa_gain": 2,
+             "mix_gain": 11,
+-            "rf_power": 16,
++            "rf_power": 17,
+             "dig_gain": 0
+         },
+         "tx_lut_11": {
+@@ -222,7 +222,18 @@
+         /* forward only valid packets */
+         "forward_crc_valid": true,
+         "forward_crc_error": false,
+-        "forward_crc_disabled": false
++        "forward_crc_disabled": false,
++        /* GPS configuration */
++        "gps_tty_path": "/dev/ttyAMA0",
++        /* Beaconing parameters */
++        "beacon_period": 128,
++        "beacon_freq_hz": 485500000,
++        "beacon_freq_nb": 8,
++        "beacon_freq_step": 200000,
++        "beacon_datarate": 10,
++        "beacon_bw_hz": 125000,
++        "beacon_power": 17,
++        "beacon_infodesc": 0
+     }
+ }
+ 
+diff --git a/lora_pkt_fwd/inc/trace.h b/lora_pkt_fwd/inc/trace.h
+old mode 100644
+new mode 100755
+index a067851..f72e07c
+--- a/lora_pkt_fwd/inc/trace.h
++++ b/lora_pkt_fwd/inc/trace.h
+@@ -21,7 +21,7 @@ Maintainer: Michael Coracin
+ #define DEBUG_JIT       0
+ #define DEBUG_JIT_ERROR 1
+ #define DEBUG_TIMERSYNC 0
+-#define DEBUG_BEACON    0
++#define DEBUG_BEACON    1
+ #define DEBUG_LOG       1
+ 
+ #define MSG(args...) printf(args) /* message that is destined to the user */
+diff --git a/lora_pkt_fwd/src/lora_pkt_fwd.c b/lora_pkt_fwd/src/lora_pkt_fwd.c
+index c449a6f..dd7a946 100755
+--- a/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -107,12 +107,12 @@ Maintainer: Michael Coracin
+ #define UNIX_GPS_EPOCH_OFFSET 315964800 /* Number of seconds ellapsed between 01.Jan.1970 00:00:00
+                                                                           and 06.Jan.1980 00:00:00 */
+ 
+-#define DEFAULT_BEACON_FREQ_HZ      869525000
+-#define DEFAULT_BEACON_FREQ_NB      1
+-#define DEFAULT_BEACON_FREQ_STEP    0
+-#define DEFAULT_BEACON_DATARATE     9
++#define DEFAULT_BEACON_FREQ_HZ      485500000
++#define DEFAULT_BEACON_FREQ_NB      8
++#define DEFAULT_BEACON_FREQ_STEP    200000
++#define DEFAULT_BEACON_DATARATE     10
+ #define DEFAULT_BEACON_BW_HZ        125000
+-#define DEFAULT_BEACON_POWER        14
++#define DEFAULT_BEACON_POWER        17
+ #define DEFAULT_BEACON_INFODESC     0
+ 
+ /* -------------------------------------------------------------------------- */
+@@ -210,7 +210,7 @@ static bool report_ready = false; /* true when there is a new report to send to
+ static char status_report[STATUS_SIZE]; /* status report as a JSON object */
+ 
+ /* beacon parameters */
+-static uint32_t beacon_period = 0; /* set beaconing period, must be a sub-multiple of 86400, the nb of sec in a day */
++static uint32_t beacon_period = 128; /* set beaconing period, must be a sub-multiple of 86400, the nb of sec in a day */
+ static uint32_t beacon_freq_hz = DEFAULT_BEACON_FREQ_HZ; /* set beacon TX frequency, in Hz */
+ static uint8_t beacon_freq_nb = DEFAULT_BEACON_FREQ_NB; /* set number of beaconing channels beacon */
+ static uint32_t beacon_freq_step = DEFAULT_BEACON_FREQ_STEP; /* set frequency step between beacon channels, in Hz */
+@@ -2011,8 +2011,8 @@ void thread_down(void) {
+             break;
+         case 9:
+             beacon_pkt.datarate = DR_LORA_SF9;
+-            beacon_RFU1_size = 2;
+-            beacon_RFU2_size = 0;
++            beacon_RFU1_size = 3;
++            beacon_RFU2_size = 1;
+             break;
+         case 10:
+             beacon_pkt.datarate = DR_LORA_SF10;
+@@ -2041,6 +2041,8 @@ void thread_down(void) {
+         beacon_pkt.payload[beacon_pyld_idx++] = 0x0;
+     }
+ 
++    //Begin delete for beacon gps info
++    #if 0
+     /* network common part beacon fields (little endian) */
+     beacon_pyld_idx += 4; /* time (variable), filled later */
+     beacon_pyld_idx += 2; /* crc1 (variable), filled later */
+@@ -2077,6 +2079,8 @@ void thread_down(void) {
+     field_crc2 = crc16((beacon_pkt.payload + 6 + beacon_RFU1_size), 7 + beacon_RFU2_size);
+     beacon_pkt.payload[beacon_pyld_idx++] = 0xFF &  field_crc2;
+     beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_crc2 >> 8);
++    #endif
++    //End
+ 
+     /* JIT queue initialization */
+     jit_queue_init(&jit_queue);
+@@ -2179,6 +2183,56 @@ void thread_down(void) {
+                     beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & field_crc1;
+                     beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_crc1 >> 8);
+ 
++                    //Begin add for beacon gps info
++                    /* GPS coordinates variables */
++                    struct coord_s cp_gps_coord = {0.0, 0.0, 0};
++
++                    /* access GPS statistics, copy them */
++                    if (gps_enabled == true) {
++                        pthread_mutex_lock(&mx_meas_gps);
++                        cp_gps_coord = meas_gps_coord;
++                        pthread_mutex_unlock(&mx_meas_gps);
++                    }
++                    
++                    /* overwrite with reference coordinates if function is enabled */
++                    if (gps_fake_enable == true) {
++                        cp_gps_coord = reference_coord;
++                    }
++                    
++                    /* calculate the latitude and longitude that must be publicly reported */
++                    field_latitude = (int32_t)((cp_gps_coord.lat / 90.0) * (double)(1<<23));
++                    if (field_latitude > (int32_t)0x007FFFFF) {
++                        field_latitude = (int32_t)0x007FFFFF; /* +90 N is represented as 89.99999 N */
++                    } else if (field_latitude < (int32_t)0xFF800000) {
++                        field_latitude = (int32_t)0xFF800000;
++                    }
++                    field_longitude = (int32_t)((cp_gps_coord.lon / 180.0) * (double)(1<<23));
++                    if (field_longitude > (int32_t)0x007FFFFF) {
++                        field_longitude = (int32_t)0x007FFFFF; /* +180 E is represented as 179.99999 E */
++                    } else if (field_longitude < (int32_t)0xFF800000) {
++                        field_longitude = (int32_t)0xFF800000;
++                    }
++                    
++                    /* gateway specific beacon fields */
++                    beacon_pkt.payload[beacon_pyld_idx++] = beacon_infodesc;
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF &  field_latitude;
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_latitude >>  8);
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_latitude >> 16);
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF &  field_longitude;
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_longitude >>  8);
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_longitude >> 16);
++                    
++                    /* RFU */
++                    for (i = 0; i < (int)beacon_RFU2_size; i++) {
++                        beacon_pkt.payload[beacon_pyld_idx++] = 0x0;
++                    }
++                    
++                    /* CRC of the beacon gateway specific part fields */
++                    field_crc2 = crc16((beacon_pkt.payload + 6 + beacon_RFU1_size), 7 + beacon_RFU2_size);
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF &  field_crc2;
++                    beacon_pkt.payload[beacon_pyld_idx++] = 0xFF & (field_crc2 >> 8);
++                    //End
++
+                     /* Insert beacon packet in JiT queue */
+                     gettimeofday(&current_unix_time, NULL);
+                     get_concentrator_time(&current_concentrator_time, current_unix_time);
+-- 
+1.8.3.1
+

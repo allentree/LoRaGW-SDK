@@ -1,0 +1,14 @@
+#! /bin/sh
+
+[ ! -d CONFIG_MBUS_TMP_PATH ] && mkdir -p CONFIG_MBUS_TMP_PATH 
+
+mkdir -p CONFIG_MBUS_SERVICE_DIR
+
+if [ -f CONFIG_MBUS_PID_FILE ]; then
+    LAST_PID="`cat CONFIG_MBUS_PID_FILE`"
+    echo "PID [${LAST_PID}] as dbus-daemon instance existed, kill it anyway..."
+    kill -9 ${LAST_PID}
+    rm -vf CONFIG_MBUS_PID_FILE
+fi
+
+./dbus-daemon --fork --config-file=./mbusd.conf --print-address $*

@@ -1,0 +1,18 @@
+{
+    "ota-info": {
+        "manufacturer": "loragw",
+        "hw_version": "2.0",
+        "sw_version": "3.0",
+        "current_version" : "2.3.1",
+        "depend_version": "2.3.0"
+    },
+    "file-list": [
+        { "name": "mqtt", "type": "file", "path": "/home/run/", "operation": "modify" },
+        { "name": "monitor", "type": "file", "path": "/home/run/", "operation": "modify" },
+        { "name": "lora_pkt_fwd", "type": "file", "path": "/home/run/", "operation": "modify" },
+        { "name": "update-deamon", "type": "file", "path": "/home/run/", "operation": "modify" },
+        { "name": "test_file002", "type": "file", "path": "/home/", "operation": "new" },
+        { "name": "test_file003", "type": "file", "path": "/home/", "operation": "modify" },
+        { "name": "echo_test.sh", "type": "exec", "rollback": "echo_test_rollback.sh" }
+    ]
+}

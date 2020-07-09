@@ -1,0 +1,26 @@
+/*
+ * _watchdog_macros.h
+ *
+ *  Created on: 2017年11月11日
+ *      Author: Zhongyang
+ */
+
+#ifndef MODULES_WATCHDOG__WATCHDOG_MACROS_H_
+#define MODULES_WATCHDOG__WATCHDOG_MACROS_H_
+
+typedef enum WATCHDOG_ERROR_TAG {
+    WATCHDOG_ERROR_SUCEESS = 0,
+    WATCHDOG_ERROR_INVALID_PARAM = -1,
+    WATCHDOG_ERROR_NO_MEM = -2,
+    WATCHDOG_ERROR_UNKNOWN = -3,
+    WATCHDOG_ERROR_IO = -4,
+    WATCHDOG_ERROR_INVALID_DATA = -5,
+    WATCHDOG_ERROR_TIME_OUT = -6,
+} WATCHDOG_ERROR;
+
+#define SIGNAL_REQUIRE_EXIT_VALID 0x5aa5
+
+#define WATCHDOG_SCRIPT_DIR                 "/script/"
+#define WATCHDOG_SCRIPT_RESTART_GATEWAY     "_wd_restart_gateway.sh"
+
+#endif /* MODULES_WATCHDOG__WATCHDOG_MACROS_H_ */

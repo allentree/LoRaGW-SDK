@@ -1,0 +1,29 @@
+室内Class B时间同步流程说明：
+1. 云端后台给室内网关下发触发开始时间同步消息，关键字段为"sync":true，log如下：
+[lora_timesync] down msg: {"txpk":{"imme":false,"freq":0.0,"rfch":0,"powe":0,"ipol":false,"size":0,"ncrc":false,"sync":true,"syncinterval":120,"synctimes":0,"synctoken":34,"synckey":"YjI4MzI3Y2FkNDYwOThlNQ==","tmms":0}}
+
+2. 室内网关周期广播发送时间同步帧，默认发送周期为120s，默认发送频点：471.9，MType为0b11100100，log如下：
+INFO: [lora_timesync] pkt rf_chain: 0, rf_power: 17, freq_hz: 471900000
+INFO: [lora_timesync] pkt count_us: 25707029, size: 19
+INFO: [lora_timesync] pkt TOA us: 185000
+INFO: [lora_timesync] count: 1, interval: 120
+
+3. 室外GPS网关接收到时间同步帧，上传到云端后台，log如下：
+JSON up: {"rxpk":[{"tmst":611431484,"time":"2018-08-20T09:36:51.269732Z","tmms":1218793030269,"usec":891,"chan":0,"rfch":0,"freq":471.900000,"stat":1,"modu":"LORA","datr":"SF9BW125","codr":"4/5","lsnr":9.5,"rssi":-39,"size":19,"data":"5AL/APD/4JbYVihKggAAIhIgJA=="}]}
+
+4. 云端后台计算GPS时间后，给室内网关下发时间调整，关键字段为"tadj"，log如下：
+INFO: [lora_timesync] down msg: {"set":{"tadj":{"tgps":1218790869890194,"tref":25707029}}}
+
+5. 室内网关接收到时间调整后，校准本地GPS时间，设置lora_ref_valid值为1，且定时发送Beacon帧，log如下：
+INFO: [lora_timesync] now tref: 25933870
+INFO: [lora_timesync] now tgps: 1218790870117035
+INFO: [lora_timesync] last_tref: 25933870
+INFO: [lora_timesync] last_tgps: 1218790870117035
+INFO: [lora_timesync] gps.tv_sec: 1218790870, gps.tv_nsec: 117034912
+[beacon] gps_ref_valid:0,utc_ref_valid:0,lora_ref_valid:1
+INFO: Beacon queued (count_us=67816834, freq_hz=486300000, size=19)
+
+备注：
+对于第一步：给室内网关下发触发开始时间同步消息，后台触发机制是：当有节点上行包通过室内网关上行时，后台通过tmms字段（为空或为0）判断，发现室内网关没有GPS时间后，给此室内网关下发触发开始时间同步消息；
+为了避免某室内网关一直同步不到时间，后台频繁给此室内网关下发触发开始时间同步消息，目前限定了给同一台室内网关连续下发触发开始时间同步消息间隔为30分钟。
+

@@ -1,0 +1,205 @@
+From bf2b6d0967108f375b949561fb0f6fa28b3cd726 Mon Sep 17 00:00:00 2001
+Date: Wed, 13 Jun 2018 15:55:33 +0800
+Subject: [PATCH 6/7] add for modify gateway default conf for accord with Link
+ WAN spec
+
+---
+ lora_pkt_fwd/global_conf.json   | 38 +++++++++++++++++++-------------------
+ lora_pkt_fwd/src/lora_pkt_fwd.c | 20 ++++++++++++--------
+ 2 files changed, 31 insertions(+), 27 deletions(-)
+
+diff --git a/lora_pkt_fwd/global_conf.json b/lora_pkt_fwd/global_conf.json
+index f72a44e..47481fa 100755
+--- a/lora_pkt_fwd/global_conf.json
++++ b/lora_pkt_fwd/global_conf.json
+@@ -16,18 +16,18 @@
+         "antenna_gain": 0, /* antenna gain, in dBi */
+         "radio_0": {
+             "enable": true,
+-            "type": "SX1257",
+-            "freq": 867500000,
++            "type": "SX1255",
++            "freq": 472200000,
+             "rssi_offset": -166.0,
+             "tx_enable": true,
+             "tx_notch_freq": 129000, /* [126..250] KHz */
+-            "tx_freq_min": 863000000,
+-            "tx_freq_max": 870000000
++            "tx_freq_min": 433000000,
++            "tx_freq_max": 510000000
+         },
+         "radio_1": {
+             "enable": true,
+-            "type": "SX1257",
+-            "freq": 868500000,
++            "type": "SX1255",
++            "freq": 473000000,
+             "rssi_offset": -166.0,
+             "tx_enable": false
+         },
+@@ -35,49 +35,49 @@
+             /* Lora MAC channel, 125kHz, all SF, 868.1 MHz */
+             "enable": true,
+             "radio": 1,
+-            "if": -400000
++            "if": -300000
+         },
+         "chan_multiSF_1": {
+             /* Lora MAC channel, 125kHz, all SF, 868.3 MHz */
+             "enable": true,
+             "radio": 1,
+-            "if": -200000
++            "if": -100000
+         },
+         "chan_multiSF_2": {
+             /* Lora MAC channel, 125kHz, all SF, 868.5 MHz */
+             "enable": true,
+             "radio": 1,
+-            "if": 0
++            "if": 100000
+         },
+         "chan_multiSF_3": {
+             /* Lora MAC channel, 125kHz, all SF, 867.1 MHz */
+             "enable": true,
+-            "radio": 0,
+-            "if": -400000
++            "radio": 1,
++            "if": 300000
+         },
+         "chan_multiSF_4": {
+             /* Lora MAC channel, 125kHz, all SF, 867.3 MHz */
+             "enable": true,
+             "radio": 0,
+-            "if": -200000
++            "if": -300000
+         },
+         "chan_multiSF_5": {
+             /* Lora MAC channel, 125kHz, all SF, 867.5 MHz */
+             "enable": true,
+             "radio": 0,
+-            "if": 0
++            "if": -100000
+         },
+         "chan_multiSF_6": {
+             /* Lora MAC channel, 125kHz, all SF, 867.7 MHz */
+             "enable": true,
+             "radio": 0,
+-            "if": 200000
++            "if": 100000
+         },
+         "chan_multiSF_7": {
+             /* Lora MAC channel, 125kHz, all SF, 867.9 MHz */
+             "enable": true,
+             "radio": 0,
+-            "if": 400000
++            "if": 300000
+         },
+         "chan_Lora_std": {
+             /* Lora MAC channel, 250kHz, SF7, 868.3 MHz */
+@@ -212,12 +212,12 @@
+     "gateway_conf": {
+         "gateway_ID": "AA555A0000000000",
+         /* change with default server address/ports, or overwrite in local_conf.json */
+-        "server_address": "localhost",
+-        "serv_port_up": 1680,
+-        "serv_port_down": 1680,
++        "server_address": "127.0.0.1",
++        "serv_port_up": 8888,
++        "serv_port_down": 9999,
+         /* adjust the following parameters for your network */
+         "keepalive_interval": 10,
+-        "stat_interval": 30,
++        "stat_interval": 60,
+         "push_timeout_ms": 100,
+         /* forward only valid packets */
+         "forward_crc_valid": true,
+diff --git a/lora_pkt_fwd/src/lora_pkt_fwd.c b/lora_pkt_fwd/src/lora_pkt_fwd.c
+index c5f7ba4..966cb78 100755
+--- a/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -1773,7 +1773,7 @@ void thread_up(void) {
+                     MSG("ERROR: [up] received packet with unknown status\n");
+                     memcpy((void *)(buff_up + buff_index), (void *)",\"stat\":?", 9);
+                     buff_index += 9;
+-                    exit(EXIT_FAILURE);
++                    // exit(EXIT_FAILURE);
+             }
+ 
+             /* Packet modulation, 13-14 useful chars */
+@@ -1811,7 +1811,7 @@ void thread_up(void) {
+                         MSG("ERROR: [up] lora packet with unknown datarate\n");
+                         memcpy((void *)(buff_up + buff_index), (void *)",\"datr\":\"SF?", 12);
+                         buff_index += 12;
+-                        exit(EXIT_FAILURE);
++                        // exit(EXIT_FAILURE);
+                 }
+                 switch (p->bandwidth) {
+                     case BW_125KHZ:
+@@ -1830,7 +1830,7 @@ void thread_up(void) {
+                         MSG("ERROR: [up] lora packet with unknown bandwidth\n");
+                         memcpy((void *)(buff_up + buff_index), (void *)"BW?\"", 4);
+                         buff_index += 4;
+-                        exit(EXIT_FAILURE);
++                        // exit(EXIT_FAILURE);
+                 }
+ 
+                 /* Packet ECC coding rate, 11-13 useful chars */
+@@ -1859,7 +1859,7 @@ void thread_up(void) {
+                         MSG("ERROR: [up] lora packet with unknown coderate\n");
+                         memcpy((void *)(buff_up + buff_index), (void *)",\"codr\":\"?\"", 11);
+                         buff_index += 11;
+-                        exit(EXIT_FAILURE);
++                        // exit(EXIT_FAILURE);
+                 }
+ 
+                 /* Lora SNR, 11-13 useful chars */
+@@ -1904,7 +1904,7 @@ void thread_up(void) {
+                 buff_index += j;
+             } else {
+                 MSG("ERROR: [up] bin_to_b64 failed line %u\n", (__LINE__ - 5));
+-                exit(EXIT_FAILURE);
++                // exit(EXIT_FAILURE);
+             }
+             buff_up[buff_index] = '"';
+             ++buff_index;
+@@ -2099,7 +2099,7 @@ void thread_down(void) {
+         default:
+             /* should not happen */
+             MSG("ERROR: unsupported bandwidth for beacon\n");
+-            exit(EXIT_FAILURE);
++            // exit(EXIT_FAILURE);
+     }
+     switch (beacon_datarate) {
+         case 8:
+@@ -2125,7 +2125,7 @@ void thread_down(void) {
+         default:
+             /* should not happen */
+             MSG("ERROR: unsupported datarate for beacon\n");
+-            exit(EXIT_FAILURE);
++            // exit(EXIT_FAILURE);
+     }
+     beacon_pkt.size = beacon_RFU1_size + 4 + 2 + 7 + beacon_RFU2_size + 2;
+     beacon_pkt.coderate = CR_LORA_4_5;
+@@ -2556,6 +2556,10 @@ void thread_down(void) {
+             }
+             txpkt.rf_chain = (uint8_t)json_value_get_number(val);
+ 
++            /* Begin add for txpk force use rf_chain = 0 */
++            txpkt.rf_chain = 0;
++            /* End */
++
+             /* parse TX power (optional field) */
+             val = json_object_get_value(txpk_obj,"powe");
+             if (val != NULL) {
+@@ -2883,7 +2887,7 @@ static void gps_process_sync(void) {
+ 
+     /* get GPS time for synchronization */
+     if (i != LGW_GPS_SUCCESS) {
+-        MSG("WARNING: [gps] could not get GPS time from GPS\n");
++        //MSG("WARNING: [gps] could not get GPS time from GPS\n");
+         return;
+     }
+ 
+-- 
+1.8.3.1
+

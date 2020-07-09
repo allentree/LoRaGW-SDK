@@ -1,0 +1,273 @@
+From 77ed279568d0bfbdc33b260ffd6311a1768045ba Mon Sep 17 00:00:00 2001
+Date: Thu, 10 May 2018 16:46:50 +0800
+Subject: [PATCH 3/7] add report cpu and memory used ratio in stat packet
+
+---
+ PROTOCOL.TXT                    |  10 ++-
+ lora_pkt_fwd/Makefile           |   4 +-
+ lora_pkt_fwd/src/lora_pkt_fwd.c |  21 +++++-
+ lora_pkt_fwd/src/sys_stat.c     | 141 ++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 171 insertions(+), 5 deletions(-)
+ mode change 100644 => 100755 PROTOCOL.TXT
+ mode change 100644 => 100755 lora_pkt_fwd/Makefile
+ create mode 100755 lora_pkt_fwd/src/sys_stat.c
+
+diff --git a/PROTOCOL.TXT b/PROTOCOL.TXT
+old mode 100644
+new mode 100755
+index d479fbe..56dc5ea
+--- a/PROTOCOL.TXT
++++ b/PROTOCOL.TXT
+@@ -225,6 +225,9 @@ That object contains the status of the gateway, with the following fields:
+  ackr | number | Percentage of upstream datagrams that were acknowledged
+  dwnb | number | Number of downlink datagrams received (unsigned integer)
+  txnb | number | Number of packets emitted (unsigned integer)
++ cpur | number | Percentage of gateway cpu used ratio
++ memr | number | Percentage of gateway memory used ratio
++ 
+ 
+ Example (white-spaces, indentation and newlines added for readability):
+ 
+@@ -239,7 +242,9 @@ Example (white-spaces, indentation and newlines added for readability):
+ 	"rxfw":2,
+ 	"ackr":100.0,
+ 	"dwnb":2,
+-	"txnb":2
++	"txnb":2,
++	"cpur":0.1,
++	"memr":26.0
+ }}
+ ```
+ 
+@@ -439,6 +444,9 @@ Examples (white-spaces, indentation and newlines added for readability):
+ 7. Revisions
+ -------------
+ 
++### v1.4.1 ###
++* Added stat package "cpur" and "memr" field for report system cpu and memory used ratio.
++
+ ### v1.4 ###
+ * Added "tmms" field for GPS time as a monotonic number of milliseconds
+ ellapsed since January 6th, 1980 (GPS Epoch). No leap second.
+diff --git a/lora_pkt_fwd/Makefile b/lora_pkt_fwd/Makefile
+old mode 100644
+new mode 100755
+index 1330d62..de3c61c
+--- a/lora_pkt_fwd/Makefile
++++ b/lora_pkt_fwd/Makefile
+@@ -61,7 +61,7 @@ $(OBJDIR)/%.o: src/%.c $(INCLUDES) | $(OBJDIR)
+ $(OBJDIR)/$(APP_NAME).o: src/$(APP_NAME).c $(LGW_INC) $(INCLUDES) | $(OBJDIR)
+ 	$(CC) -c $(CFLAGS) $(VFLAG) -I$(LGW_PATH)/inc $< -o $@
+ 
+-$(APP_NAME): $(OBJDIR)/$(APP_NAME).o $(LGW_PATH)/libloragw.a $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o
+-	$(CC) -L$(LGW_PATH) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o -o $@ $(LIBS)
++$(APP_NAME): $(OBJDIR)/$(APP_NAME).o $(LGW_PATH)/libloragw.a $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/sys_stat.o
++	$(CC) -L$(LGW_PATH) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/sys_stat.o -o $@ $(LIBS)
+ 
+ ### EOF
+diff --git a/lora_pkt_fwd/src/lora_pkt_fwd.c b/lora_pkt_fwd/src/lora_pkt_fwd.c
+index dd7a946..2639876 100755
+--- a/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -263,6 +263,11 @@ void thread_valid(void);
+ void thread_jit(void);
+ void thread_timersync(void);
+ 
++// Begin add for get cpu/mem used ratio
++extern int get_cpu_ratio(float* cpu_ratio);
++extern int get_mem_ratio(float* mem_ratio);
++// End
++
+ /* -------------------------------------------------------------------------- */
+ /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
+ 
+@@ -1047,6 +1052,10 @@ int main(void)
+     float rx_nocrc_ratio;
+     float up_ack_ratio;
+     float dw_ack_ratio;
++    // Begin add for get cpu/mem used ratio
++    float cpu_ratio = 0.0;
++    float mem_ratio = 0.0;
++    // End
+ 
+     /* display version informations */
+     MSG("*** Beacon Packet Forwarder for Lora Gateway ***\nVersion: " VERSION_STRING "\n");
+@@ -1346,6 +1355,12 @@ int main(void)
+             dw_ack_ratio = 0.0;
+         }
+ 
++        // Begin add for get cpu/mem used ratio
++        get_mem_ratio(&mem_ratio);
++
++        get_cpu_ratio(&cpu_ratio);
++        // End
++
+         /* access GPS statistics, copy them */
+         if (gps_enabled == true) {
+             pthread_mutex_lock(&mx_meas_gps);
+@@ -1414,11 +1429,13 @@ int main(void)
+ 
+         /* generate a JSON report (will be sent to server by upstream thread) */
+         pthread_mutex_lock(&mx_stat_rep);
++        // Begin modify for add cpur/memr stat
+         if (((gps_enabled == true) && (coord_ok == true)) || (gps_fake_enable == true)) {
+-            snprintf(status_report, STATUS_SIZE, "\"stat\":{\"time\":\"%s\",\"lati\":%.5f,\"long\":%.5f,\"alti\":%i,\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f,\"dwnb\":%u,\"txnb\":%u}", stat_timestamp, cp_gps_coord.lat, cp_gps_coord.lon, cp_gps_coord.alt, cp_nb_rx_rcv, cp_nb_rx_ok, cp_up_pkt_fwd, 100.0 * up_ack_ratio, cp_dw_dgram_rcv, cp_nb_tx_ok);
++            snprintf(status_report, STATUS_SIZE, "\"stat\":{\"time\":\"%s\",\"lati\":%.5f,\"long\":%.5f,\"alti\":%i,\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f,\"dwnb\":%u,\"txnb\":%u,\"cpur\":%.1f,\"memr\":%.1f}", stat_timestamp, cp_gps_coord.lat, cp_gps_coord.lon, cp_gps_coord.alt, cp_nb_rx_rcv, cp_nb_rx_ok, cp_up_pkt_fwd, 100.0 * up_ack_ratio, cp_dw_dgram_rcv, cp_nb_tx_ok, 100.0 * cpu_ratio, 100.0 * mem_ratio);
+         } else {
+-            snprintf(status_report, STATUS_SIZE, "\"stat\":{\"time\":\"%s\",\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f,\"dwnb\":%u,\"txnb\":%u}", stat_timestamp, cp_nb_rx_rcv, cp_nb_rx_ok, cp_up_pkt_fwd, 100.0 * up_ack_ratio, cp_dw_dgram_rcv, cp_nb_tx_ok);
++            snprintf(status_report, STATUS_SIZE, "\"stat\":{\"time\":\"%s\",\"rxnb\":%u,\"rxok\":%u,\"rxfw\":%u,\"ackr\":%.1f,\"dwnb\":%u,\"txnb\":%u,\"cpur\":%.1f,\"memr\":%.1f}", stat_timestamp, cp_nb_rx_rcv, cp_nb_rx_ok, cp_up_pkt_fwd, 100.0 * up_ack_ratio, cp_dw_dgram_rcv, cp_nb_tx_ok, 100.0 * cpu_ratio, 100.0 * mem_ratio);
+         }
++        // End
+         report_ready = true;
+         pthread_mutex_unlock(&mx_stat_rep);
+     }
+diff --git a/lora_pkt_fwd/src/sys_stat.c b/lora_pkt_fwd/src/sys_stat.c
+new file mode 100755
+index 0000000..aadfd2a
+--- /dev/null
++++ b/lora_pkt_fwd/src/sys_stat.c
+@@ -0,0 +1,141 @@
++#include <stdint.h>     /* C99 types */
++#include <stdbool.h>    /* bool type */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++struct cpu_stat_s {
++    char cpu_name[32];
++    uint64_t user;
++    uint64_t nice;
++    uint64_t system;
++    uint64_t idle;
++    uint64_t iowait;
++    uint64_t irq;
++    uint64_t softirq;
++    uint64_t steal;
++};
++
++uint64_t pre_cpu_sum = 0;
++uint64_t pre_cpu_idle = 0;
++
++static int get_cpu_stat(struct cpu_stat_s* cpu_stat)
++{
++    FILE *fp;
++    char buff[512];
++
++    fp = fopen ("/proc/stat", "r");
++    if (NULL == fp) {
++        printf("fopen /proc/stat file error");
++        return -1;
++    }
++
++    fgets (buff, sizeof(buff), fp);
++    //printf("%s", buff);
++    sscanf (buff, "%s %llu %llu %llu %llu %llu %llu %llu %llu ", cpu_stat->cpu_name, &cpu_stat->user, &cpu_stat->nice, &cpu_stat->system, 
++                &cpu_stat->idle, &cpu_stat->iowait, &cpu_stat->irq, &cpu_stat->softirq, &cpu_stat->steal); 
++    //printf("%s %llu %llu %llu %llu %llu %llu %llu %llu\n", cpu_stat->cpu_name, cpu_stat->user, cpu_stat->nice, cpu_stat->system,
++    //            cpu_stat->idle, cpu_stat->iowait, cpu_stat->irq, cpu_stat->softirq, cpu_stat->steal);
++
++    fclose(fp);
++
++    return 0;
++}
++
++int get_cpu_ratio(float* cpu_ratio)
++{
++    struct cpu_stat_s cpu_stat;
++    uint64_t cpu_sum = 0;
++    uint64_t cpu_sum_diff = 0;
++    uint64_t cpu_idle_diff = 0;
++    int ret = 0;
++    
++    *cpu_ratio = 0.0;
++
++    ret = get_cpu_stat(&cpu_stat);
++    if (ret == 0) {
++        cpu_sum = cpu_stat.user + cpu_stat.nice + cpu_stat.system + cpu_stat.idle 
++                + cpu_stat.iowait + cpu_stat.irq + cpu_stat.softirq + cpu_stat.steal;
++        //printf("idle: %llu\n", cpu_stat.idle);
++        //printf("cpu_sum: %llu\n", cpu_sum);
++        cpu_idle_diff = cpu_stat.idle - pre_cpu_idle;
++        cpu_sum_diff = cpu_sum - pre_cpu_sum;
++        //printf("idle_diff: %llu\n", cpu_idle_diff);
++        //printf("sum_diff: %llu\n", cpu_sum_diff);
++ 
++        if (cpu_sum_diff != 0) {
++            *cpu_ratio = (float)(cpu_sum_diff - cpu_idle_diff) / (float)cpu_sum_diff;
++        }
++
++        pre_cpu_idle = cpu_stat.idle;
++        pre_cpu_sum = cpu_sum;
++    }
++
++    printf("cpu_ratio: %.1f\n", (*cpu_ratio) * 100.0);
++
++    return 0;
++}
++
++int get_mem_ratio(float* mem_ratio)
++{
++    FILE *fp = NULL;
++    char buff[256] = {0};
++    char mem_name[32] = {0};
++    uint32_t mem_total = 0;
++    uint32_t mem_free  = 0;
++    uint32_t mem_used  = 0;
++    uint32_t mem_cached = 0;
++	uint32_t mem_buffers = 0;
++	
++	uint32_t mem_tmp = 0;
++    uint8_t get_cached_mem = 0;
++	uint8_t get_buffers_mem = 0;
++	
++    *mem_ratio = 0.0;
++
++    fp = fopen ("/proc/meminfo", "r");
++    if (NULL == fp) {
++        printf("fopen /proc/meminfo file error");
++        return -1;
++    }
++
++    fgets (buff, sizeof(buff), fp);
++    sscanf (buff, "%s %u ", mem_name, &mem_total);
++    //printf("%s", buff);
++
++    fgets (buff, sizeof(buff), fp);
++    //printf("%s", buff);
++    sscanf (buff, "%s %u ", mem_name, &mem_free);
++    while(fgets (buff, sizeof(buff), fp)){
++        sscanf (buff, "%s %u ", mem_name, &mem_tmp);
++        if(strncmp(mem_name , "Cached", strlen("Cached")) == 0){
++            get_cached_mem = 1;
++			mem_cached = mem_tmp ;
++        }
++		else if(strncmp(mem_name , "Buffers", strlen("Buffers")) == 0){
++            get_buffers_mem = 1;
++			mem_buffers = mem_tmp ;
++        }
++		if(get_cached_mem && get_buffers_mem)
++			break;
++    }
++	
++    mem_used = mem_total - mem_free;
++    if(get_cached_mem) {
++        mem_used -= mem_cached;
++    }
++	if(get_buffers_mem) {
++		mem_used -= mem_buffers;
++	}
++    //printf("mem_used: %14u kB\n", mem_used);
++    if (mem_total != 0) {
++    	*mem_ratio = (float)mem_used / (float)mem_total;
++    }
++
++    printf("mem_ratio: %.1f\n", (*mem_ratio) * 100.0);
++
++    fclose(fp);
++
++    return 0;
++}
++
+-- 
+1.8.3.1
+

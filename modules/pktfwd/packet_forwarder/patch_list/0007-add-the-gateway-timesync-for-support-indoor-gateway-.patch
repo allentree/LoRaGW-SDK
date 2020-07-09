@@ -1,0 +1,2875 @@
+From 8f4cae03afe8da2ccec009a86bbd0373fb5cc163 Mon Sep 17 00:00:00 2001
+Date: Tue, 31 Jul 2018 18:17:24 +0800
+Subject: [PATCH 7/7] add the gateway timesync for support indoor gateway
+ ClassB feature
+
+---
+ lora_pkt_fwd/Makefile            |   4 +-
+ lora_pkt_fwd/inc/aes.h           | 160 +++++++
+ lora_pkt_fwd/inc/cmac.h          |  63 +++
+ lora_pkt_fwd/inc/lora_timesync.h |  55 +++
+ lora_pkt_fwd/src/aes.c           | 936 +++++++++++++++++++++++++++++++++++++++
+ lora_pkt_fwd/src/cmac.c          | 154 +++++++
+ lora_pkt_fwd/src/lora_pkt_fwd.c  | 277 ++++++++++--
+ lora_pkt_fwd/src/lora_timesync.c | 472 ++++++++++++++++++++
+ lora_pkt_fwd/src/ntp_time.c      | 438 ++++++++++++++++++
+ 9 files changed, 2524 insertions(+), 35 deletions(-)
+ create mode 100755 lora_pkt_fwd/inc/aes.h
+ create mode 100755 lora_pkt_fwd/inc/cmac.h
+ create mode 100755 lora_pkt_fwd/inc/lora_timesync.h
+ create mode 100755 lora_pkt_fwd/src/aes.c
+ create mode 100755 lora_pkt_fwd/src/cmac.c
+ create mode 100755 lora_pkt_fwd/src/lora_timesync.c
+ create mode 100755 lora_pkt_fwd/src/ntp_time.c
+
+diff --git a/lora_pkt_fwd/Makefile b/lora_pkt_fwd/Makefile
+index 8dae9e1..07370c6 100755
+--- a/lora_pkt_fwd/Makefile
++++ b/lora_pkt_fwd/Makefile
+@@ -61,7 +61,7 @@ $(OBJDIR)/%.o: src/%.c $(INCLUDES) | $(OBJDIR)
+ $(OBJDIR)/$(APP_NAME).o: src/$(APP_NAME).c $(LGW_INC) $(INCLUDES) | $(OBJDIR)
+ 	$(CC) -c $(CFLAGS) $(VFLAG) -I$(LGW_PATH)/inc $< -o $@
+ 
+-$(APP_NAME): $(OBJDIR)/$(APP_NAME).o $(LGW_PATH)/libloragw.a $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o
+-	$(CC) -L$(LGW_PATH) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o -o $@ $(LIBS)
++$(APP_NAME): $(OBJDIR)/$(APP_NAME).o $(LGW_PATH)/libloragw.a $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/aes.o $(OBJDIR)/cmac.o $(OBJDIR)/lora_timesync.o $(OBJDIR)/ntp_time.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o
++	$(CC) -L$(LGW_PATH) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/aes.o $(OBJDIR)/cmac.o $(OBJDIR)/lora_timesync.o $(OBJDIR)/ntp_time.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o -o $@ $(LIBS)
+ 
+ ### EOF
+diff --git a/lora_pkt_fwd/inc/aes.h b/lora_pkt_fwd/inc/aes.h
+new file mode 100755
+index 0000000..7203db5
+--- /dev/null
++++ b/lora_pkt_fwd/inc/aes.h
+@@ -0,0 +1,160 @@
++/*
++ ---------------------------------------------------------------------------
++ Copyright (c) 1998-2008, Brian Gladman, Worcester, UK. All rights reserved.
++
++ LICENSE TERMS
++
++ The redistribution and use of this software (with or without changes)
++ is allowed without the payment of fees or royalties provided that:
++
++  1. source code distributions include the above copyright notice, this
++     list of conditions and the following disclaimer;
++
++  2. binary distributions include the above copyright notice, this list
++     of conditions and the following disclaimer in their documentation;
++
++  3. the name of the copyright holder is not used to endorse products
++     built using this software without specific written permission.
++
++ DISCLAIMER
++
++ This software is provided 'as is' with no explicit or implied warranties
++ in respect of its properties, including, but not limited to, correctness
++ and/or fitness for purpose.
++ ---------------------------------------------------------------------------
++ Issue 09/09/2006
++
++ This is an AES implementation that uses only 8-bit byte operations on the
++ cipher state.
++ */
++
++#ifndef AES_H
++#define AES_H
++
++#if 1
++#  define AES_ENC_PREKEYED  /* AES encryption with a precomputed key schedule  */
++#endif
++#if 0
++#  define AES_DEC_PREKEYED  /* AES decryption with a precomputed key schedule  */
++#endif
++#if 0
++#  define AES_ENC_128_OTFK  /* AES encryption with 'on the fly' 128 bit keying */
++#endif
++#if 0
++#  define AES_DEC_128_OTFK  /* AES decryption with 'on the fly' 128 bit keying */
++#endif
++#if 0
++#  define AES_ENC_256_OTFK  /* AES encryption with 'on the fly' 256 bit keying */
++#endif
++#if 0
++#  define AES_DEC_256_OTFK  /* AES decryption with 'on the fly' 256 bit keying */
++#endif
++
++#define N_ROW                   4
++#define N_COL                   4
++#define N_BLOCK   (N_ROW * N_COL)
++#define N_MAX_ROUNDS           14
++
++typedef uint8_t return_type;
++
++/*  Warning: The key length for 256 bit keys overflows a byte
++    (see comment below)
++*/
++
++typedef uint8_t length_type;
++
++typedef struct
++{   uint8_t ksch[(N_MAX_ROUNDS + 1) * N_BLOCK];
++    uint8_t rnd;
++} aes_context;
++
++/*  The following calls are for a precomputed key schedule
++
++    NOTE: If the length_type used for the key length is an
++    unsigned 8-bit character, a key length of 256 bits must
++    be entered as a length in bytes (valid inputs are hence
++    128, 192, 16, 24 and 32).
++*/
++
++#if defined( AES_ENC_PREKEYED ) || defined( AES_DEC_PREKEYED )
++
++return_type aes_set_key( const uint8_t key[],
++                         length_type keylen,
++                         aes_context ctx[1] );
++#endif
++
++#if defined( AES_ENC_PREKEYED )
++
++return_type aes_encrypt( const uint8_t in[N_BLOCK],
++                         uint8_t out[N_BLOCK],
++                         const aes_context ctx[1] );
++
++return_type aes_cbc_encrypt( const uint8_t *in,
++                         uint8_t *out,
++                         int32_t n_block,
++                         uint8_t iv[N_BLOCK],
++                         const aes_context ctx[1] );
++#endif
++
++#if defined( AES_DEC_PREKEYED )
++
++return_type aes_decrypt( const uint8_t in[N_BLOCK],
++                         uint8_t out[N_BLOCK],
++                         const aes_context ctx[1] );
++
++return_type aes_cbc_decrypt( const uint8_t *in,
++                         uint8_t *out,
++                         int32_t n_block,
++                         uint8_t iv[N_BLOCK],
++                         const aes_context ctx[1] );
++#endif
++
++/*  The following calls are for 'on the fly' keying.  In this case the
++    encryption and decryption keys are different.
++
++    The encryption subroutines take a key in an array of bytes in
++    key[L] where L is 16, 24 or 32 bytes for key lengths of 128,
++    192, and 256 bits respectively.  They then encrypts the input
++    data, in[] with this key and put the reult in the output array
++    out[].  In addition, the second key array, o_key[L], is used
++    to output the key that is needed by the decryption subroutine
++    to reverse the encryption operation.  The two key arrays can
++    be the same array but in this case the original key will be
++    overwritten.
++
++    In the same way, the decryption subroutines output keys that
++    can be used to reverse their effect when used for encryption.
++
++    Only 128 and 256 bit keys are supported in these 'on the fly'
++    modes.
++*/
++
++#if defined( AES_ENC_128_OTFK )
++void aes_encrypt_128( const uint8_t in[N_BLOCK],
++                      uint8_t out[N_BLOCK],
++                      const uint8_t key[N_BLOCK],
++                      uint8_t o_key[N_BLOCK] );
++#endif
++
++#if defined( AES_DEC_128_OTFK )
++void aes_decrypt_128( const uint8_t in[N_BLOCK],
++                      uint8_t out[N_BLOCK],
++                      const uint8_t key[N_BLOCK],
++                      uint8_t o_key[N_BLOCK] );
++#endif
++
++#if defined( AES_ENC_256_OTFK )
++void aes_encrypt_256( const uint8_t in[N_BLOCK],
++                      uint8_t out[N_BLOCK],
++                      const uint8_t key[2 * N_BLOCK],
++                      uint8_t o_key[2 * N_BLOCK] );
++#endif
++
++#if defined( AES_DEC_256_OTFK )
++void aes_decrypt_256( const uint8_t in[N_BLOCK],
++                      uint8_t out[N_BLOCK],
++                      const uint8_t key[2 * N_BLOCK],
++                      uint8_t o_key[2 * N_BLOCK] );
++#endif
++
++#endif
+diff --git a/lora_pkt_fwd/inc/cmac.h b/lora_pkt_fwd/inc/cmac.h
+new file mode 100755
+index 0000000..af52f5a
+--- /dev/null
++++ b/lora_pkt_fwd/inc/cmac.h
+@@ -0,0 +1,63 @@
++/**************************************************************************
++Copyright (C) 2009 Lander Casado, Philippas Tsigas
++
++All rights reserved.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of this software and associated documentation files 
++(the "Software"), to deal with the Software without restriction, including
++without limitation the rights to use, copy, modify, merge, publish, 
++distribute, sublicense, and/or sell copies of the Software, and to
++permit persons to whom the Software is furnished to do so, subject to
++the following conditions: 
++
++Redistributions of source code must retain the above copyright notice, 
++this list of conditions and the following disclaimers. Redistributions in
++binary form must reproduce the above copyright notice, this list of
++conditions and the following disclaimers in the documentation and/or 
++other materials provided with the distribution.
++
++In no event shall the authors or copyright holders be liable for any special,
++incidental, indirect or consequential damages of any kind, or any damages 
++whatsoever resulting from loss of use, data or profits, whether or not 
++advised of the possibility of damage, and on any theory of liability, 
++arising out of or in connection with the use or performance of this software.
++ 
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
++FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
++DEALINGS WITH THE SOFTWARE
++
++*****************************************************************************/
++
++#ifndef _CMAC_H_
++#define _CMAC_H_
++
++#include "aes.h" 
++  
++#define AES_CMAC_KEY_LENGTH     16
++#define AES_CMAC_DIGEST_LENGTH  16
++ 
++typedef struct _AES_CMAC_CTX {
++            aes_context    rijndael;
++            uint8_t        X[16];
++            uint8_t        M_last[16];
++            uint32_t       M_n;
++    } AES_CMAC_CTX;
++   
++//#include <sys/cdefs.h>
++    
++//__BEGIN_DECLS
++void     AES_CMAC_Init(AES_CMAC_CTX * ctx);
++void     AES_CMAC_SetKey(AES_CMAC_CTX * ctx, const uint8_t key[AES_CMAC_KEY_LENGTH]);
++void     AES_CMAC_Update(AES_CMAC_CTX * ctx, const uint8_t * data, uint32_t len);
++          //          __attribute__((__bounded__(__string__,2,3)));
++void     AES_CMAC_Final(uint8_t digest[AES_CMAC_DIGEST_LENGTH], AES_CMAC_CTX  * ctx);
++            //     __attribute__((__bounded__(__minbytes__,1,AES_CMAC_DIGEST_LENGTH)));
++//__END_DECLS
++
++#endif /* _CMAC_H_ */
++
+diff --git a/lora_pkt_fwd/inc/lora_timesync.h b/lora_pkt_fwd/inc/lora_timesync.h
+new file mode 100755
+index 0000000..dd8ee31
+--- /dev/null
++++ b/lora_pkt_fwd/inc/lora_timesync.h
+@@ -0,0 +1,55 @@
++
++#ifndef _LORA_TIME_SYNC_H
++#define _LORA_TIME_SYNC_H
++
++/* -------------------------------------------------------------------------- */
++/* --- DEPENDANCIES --------------------------------------------------------- */
++
++#include <stdint.h>     /* C99 types */
++#include <stdbool.h>    /* bool type */
++#include "loragw_gps.h"
++
++/* -------------------------------------------------------------------------- */
++/* --- PUBLIC CONSTANTS ----------------------------------------------------- */
++
++#define USE_LORA_TIME_SYNC
++
++#define LORA_TIME_SYNC_UP           0x83
++#define LORA_TIME_SYNC_DOWN         0x84
++
++#define TIME_SYNC_INTERVAL_DEFAULT  120
++#define TIME_SYNC_INTERVAL_MAX      300
++
++/* -------------------------------------------------------------------------- */
++/* --- PUBLIC TYPES --------------------------------------------------------- */
++
++struct lora_time_sync_s {
++    uint8_t enable;
++    uint8_t bsgw_selected;
++    uint16_t interval;
++    uint16_t times;
++    uint8_t token;
++    uint8_t use_key;
++    uint8_t key[16];
++    uint32_t freq_hz;
++    uint8_t  rf_chain;
++    int8_t   rf_power;
++    uint16_t count;
++    uint32_t net_mac_h;
++    uint32_t net_mac_l;
++    uint64_t last_tgps;
++    uint32_t last_tref;
++};
++
++
++/* -------------------------------------------------------------------------- */
++/* --- PUBLIC FUNCTIONS PROTOTYPES ------------------------------------------ */
++int lora_timesync_down(const uint8_t *msg_buf, uint16_t msg_len);
++int lora_timesync_set(struct tref *ref, bool need_update);
++void thread_lora_timesync(void);
++
++extern pthread_mutex_t mx_timesync;
++extern struct lora_time_sync_s lora_timesync;
++
++#endif
++/* --- EOF ------------------------------------------------------------------ */
+diff --git a/lora_pkt_fwd/src/aes.c b/lora_pkt_fwd/src/aes.c
+new file mode 100755
+index 0000000..7f46ea3
+--- /dev/null
++++ b/lora_pkt_fwd/src/aes.c
+@@ -0,0 +1,936 @@
++/*
++ ---------------------------------------------------------------------------
++ Copyright (c) 1998-2008, Brian Gladman, Worcester, UK. All rights reserved.
++
++ LICENSE TERMS
++
++ The redistribution and use of this software (with or without changes)
++ is allowed without the payment of fees or royalties provided that:
++
++  1. source code distributions include the above copyright notice, this
++     list of conditions and the following disclaimer;
++
++  2. binary distributions include the above copyright notice, this list
++     of conditions and the following disclaimer in their documentation;
++
++  3. the name of the copyright holder is not used to endorse products
++     built using this software without specific written permission.
++
++ DISCLAIMER
++
++ This software is provided 'as is' with no explicit or implied warranties
++ in respect of its properties, including, but not limited to, correctness
++ and/or fitness for purpose.
++ ---------------------------------------------------------------------------
++ Issue 09/09/2006
++
++ This is an AES implementation that uses only 8-bit byte operations on the
++ cipher state (there are options to use 32-bit types if available).
++
++ The combination of mix columns and byte substitution used here is based on
++ that developed by Karl Malbrain. His contribution is acknowledged.
++ */
++
++/* define if you have a fast memcpy function on your system */
++#if 0
++#  define HAVE_MEMCPY
++#  include <string.h>
++#  if defined( _MSC_VER )
++#    include <intrin.h>
++#    pragma intrinsic( memcpy )
++#  endif
++#endif
++
++
++#include <stdlib.h>
++#include <stdint.h>
++
++/* define if you have fast 32-bit types on your system */
++#if ( __CORTEX_M != 0 ) // if Cortex is different from M0/M0+
++#  define HAVE_UINT_32T
++#endif
++
++/* define if you don't want any tables */
++#if 1
++#  define USE_TABLES
++#endif
++
++/*  On Intel Core 2 duo VERSION_1 is faster */
++
++/* alternative versions (test for performance on your system) */
++#if 1
++#  define VERSION_1
++#endif
++
++#include "aes.h"
++
++//#if defined( HAVE_UINT_32T )
++//  typedef unsigned long uint32_t;
++//#endif
++
++/* functions for finite field multiplication in the AES Galois field    */
++
++#define WPOLY   0x011b
++#define BPOLY     0x1b
++#define DPOLY   0x008d
++
++#define f1(x)   (x)
++#define f2(x)   ((x << 1) ^ (((x >> 7) & 1) * WPOLY))
++#define f4(x)   ((x << 2) ^ (((x >> 6) & 1) * WPOLY) ^ (((x >> 6) & 2) * WPOLY))
++#define f8(x)   ((x << 3) ^ (((x >> 5) & 1) * WPOLY) ^ (((x >> 5) & 2) * WPOLY) \
++                          ^ (((x >> 5) & 4) * WPOLY))
++#define d2(x)   (((x) >> 1) ^ ((x) & 1 ? DPOLY : 0))
++
++#define f3(x)   (f2(x) ^ x)
++#define f9(x)   (f8(x) ^ x)
++#define fb(x)   (f8(x) ^ f2(x) ^ x)
++#define fd(x)   (f8(x) ^ f4(x) ^ x)
++#define fe(x)   (f8(x) ^ f4(x) ^ f2(x))
++
++#if defined( USE_TABLES )
++
++#define sb_data(w) {    /* S Box data values */                            \
++    w(0x63), w(0x7c), w(0x77), w(0x7b), w(0xf2), w(0x6b), w(0x6f), w(0xc5),\
++    w(0x30), w(0x01), w(0x67), w(0x2b), w(0xfe), w(0xd7), w(0xab), w(0x76),\
++    w(0xca), w(0x82), w(0xc9), w(0x7d), w(0xfa), w(0x59), w(0x47), w(0xf0),\
++    w(0xad), w(0xd4), w(0xa2), w(0xaf), w(0x9c), w(0xa4), w(0x72), w(0xc0),\
++    w(0xb7), w(0xfd), w(0x93), w(0x26), w(0x36), w(0x3f), w(0xf7), w(0xcc),\
++    w(0x34), w(0xa5), w(0xe5), w(0xf1), w(0x71), w(0xd8), w(0x31), w(0x15),\
++    w(0x04), w(0xc7), w(0x23), w(0xc3), w(0x18), w(0x96), w(0x05), w(0x9a),\
++    w(0x07), w(0x12), w(0x80), w(0xe2), w(0xeb), w(0x27), w(0xb2), w(0x75),\
++    w(0x09), w(0x83), w(0x2c), w(0x1a), w(0x1b), w(0x6e), w(0x5a), w(0xa0),\
++    w(0x52), w(0x3b), w(0xd6), w(0xb3), w(0x29), w(0xe3), w(0x2f), w(0x84),\
++    w(0x53), w(0xd1), w(0x00), w(0xed), w(0x20), w(0xfc), w(0xb1), w(0x5b),\
++    w(0x6a), w(0xcb), w(0xbe), w(0x39), w(0x4a), w(0x4c), w(0x58), w(0xcf),\
++    w(0xd0), w(0xef), w(0xaa), w(0xfb), w(0x43), w(0x4d), w(0x33), w(0x85),\
++    w(0x45), w(0xf9), w(0x02), w(0x7f), w(0x50), w(0x3c), w(0x9f), w(0xa8),\
++    w(0x51), w(0xa3), w(0x40), w(0x8f), w(0x92), w(0x9d), w(0x38), w(0xf5),\
++    w(0xbc), w(0xb6), w(0xda), w(0x21), w(0x10), w(0xff), w(0xf3), w(0xd2),\
++    w(0xcd), w(0x0c), w(0x13), w(0xec), w(0x5f), w(0x97), w(0x44), w(0x17),\
++    w(0xc4), w(0xa7), w(0x7e), w(0x3d), w(0x64), w(0x5d), w(0x19), w(0x73),\
++    w(0x60), w(0x81), w(0x4f), w(0xdc), w(0x22), w(0x2a), w(0x90), w(0x88),\
++    w(0x46), w(0xee), w(0xb8), w(0x14), w(0xde), w(0x5e), w(0x0b), w(0xdb),\
++    w(0xe0), w(0x32), w(0x3a), w(0x0a), w(0x49), w(0x06), w(0x24), w(0x5c),\
++    w(0xc2), w(0xd3), w(0xac), w(0x62), w(0x91), w(0x95), w(0xe4), w(0x79),\
++    w(0xe7), w(0xc8), w(0x37), w(0x6d), w(0x8d), w(0xd5), w(0x4e), w(0xa9),\
++    w(0x6c), w(0x56), w(0xf4), w(0xea), w(0x65), w(0x7a), w(0xae), w(0x08),\
++    w(0xba), w(0x78), w(0x25), w(0x2e), w(0x1c), w(0xa6), w(0xb4), w(0xc6),\
++    w(0xe8), w(0xdd), w(0x74), w(0x1f), w(0x4b), w(0xbd), w(0x8b), w(0x8a),\
++    w(0x70), w(0x3e), w(0xb5), w(0x66), w(0x48), w(0x03), w(0xf6), w(0x0e),\
++    w(0x61), w(0x35), w(0x57), w(0xb9), w(0x86), w(0xc1), w(0x1d), w(0x9e),\
++    w(0xe1), w(0xf8), w(0x98), w(0x11), w(0x69), w(0xd9), w(0x8e), w(0x94),\
++    w(0x9b), w(0x1e), w(0x87), w(0xe9), w(0xce), w(0x55), w(0x28), w(0xdf),\
++    w(0x8c), w(0xa1), w(0x89), w(0x0d), w(0xbf), w(0xe6), w(0x42), w(0x68),\
++    w(0x41), w(0x99), w(0x2d), w(0x0f), w(0xb0), w(0x54), w(0xbb), w(0x16) }
++
++#define isb_data(w) {   /* inverse S Box data values */                    \
++    w(0x52), w(0x09), w(0x6a), w(0xd5), w(0x30), w(0x36), w(0xa5), w(0x38),\
++    w(0xbf), w(0x40), w(0xa3), w(0x9e), w(0x81), w(0xf3), w(0xd7), w(0xfb),\
++    w(0x7c), w(0xe3), w(0x39), w(0x82), w(0x9b), w(0x2f), w(0xff), w(0x87),\
++    w(0x34), w(0x8e), w(0x43), w(0x44), w(0xc4), w(0xde), w(0xe9), w(0xcb),\
++    w(0x54), w(0x7b), w(0x94), w(0x32), w(0xa6), w(0xc2), w(0x23), w(0x3d),\
++    w(0xee), w(0x4c), w(0x95), w(0x0b), w(0x42), w(0xfa), w(0xc3), w(0x4e),\
++    w(0x08), w(0x2e), w(0xa1), w(0x66), w(0x28), w(0xd9), w(0x24), w(0xb2),\
++    w(0x76), w(0x5b), w(0xa2), w(0x49), w(0x6d), w(0x8b), w(0xd1), w(0x25),\
++    w(0x72), w(0xf8), w(0xf6), w(0x64), w(0x86), w(0x68), w(0x98), w(0x16),\
++    w(0xd4), w(0xa4), w(0x5c), w(0xcc), w(0x5d), w(0x65), w(0xb6), w(0x92),\
++    w(0x6c), w(0x70), w(0x48), w(0x50), w(0xfd), w(0xed), w(0xb9), w(0xda),\
++    w(0x5e), w(0x15), w(0x46), w(0x57), w(0xa7), w(0x8d), w(0x9d), w(0x84),\
++    w(0x90), w(0xd8), w(0xab), w(0x00), w(0x8c), w(0xbc), w(0xd3), w(0x0a),\
++    w(0xf7), w(0xe4), w(0x58), w(0x05), w(0xb8), w(0xb3), w(0x45), w(0x06),\
++    w(0xd0), w(0x2c), w(0x1e), w(0x8f), w(0xca), w(0x3f), w(0x0f), w(0x02),\
++    w(0xc1), w(0xaf), w(0xbd), w(0x03), w(0x01), w(0x13), w(0x8a), w(0x6b),\
++    w(0x3a), w(0x91), w(0x11), w(0x41), w(0x4f), w(0x67), w(0xdc), w(0xea),\
++    w(0x97), w(0xf2), w(0xcf), w(0xce), w(0xf0), w(0xb4), w(0xe6), w(0x73),\
++    w(0x96), w(0xac), w(0x74), w(0x22), w(0xe7), w(0xad), w(0x35), w(0x85),\
++    w(0xe2), w(0xf9), w(0x37), w(0xe8), w(0x1c), w(0x75), w(0xdf), w(0x6e),\
++    w(0x47), w(0xf1), w(0x1a), w(0x71), w(0x1d), w(0x29), w(0xc5), w(0x89),\
++    w(0x6f), w(0xb7), w(0x62), w(0x0e), w(0xaa), w(0x18), w(0xbe), w(0x1b),\
++    w(0xfc), w(0x56), w(0x3e), w(0x4b), w(0xc6), w(0xd2), w(0x79), w(0x20),\
++    w(0x9a), w(0xdb), w(0xc0), w(0xfe), w(0x78), w(0xcd), w(0x5a), w(0xf4),\
++    w(0x1f), w(0xdd), w(0xa8), w(0x33), w(0x88), w(0x07), w(0xc7), w(0x31),\
++    w(0xb1), w(0x12), w(0x10), w(0x59), w(0x27), w(0x80), w(0xec), w(0x5f),\
++    w(0x60), w(0x51), w(0x7f), w(0xa9), w(0x19), w(0xb5), w(0x4a), w(0x0d),\
++    w(0x2d), w(0xe5), w(0x7a), w(0x9f), w(0x93), w(0xc9), w(0x9c), w(0xef),\
++    w(0xa0), w(0xe0), w(0x3b), w(0x4d), w(0xae), w(0x2a), w(0xf5), w(0xb0),\
++    w(0xc8), w(0xeb), w(0xbb), w(0x3c), w(0x83), w(0x53), w(0x99), w(0x61),\
++    w(0x17), w(0x2b), w(0x04), w(0x7e), w(0xba), w(0x77), w(0xd6), w(0x26),\
++    w(0xe1), w(0x69), w(0x14), w(0x63), w(0x55), w(0x21), w(0x0c), w(0x7d) }
++
++#define mm_data(w) {    /* basic data for forming finite field tables */   \
++    w(0x00), w(0x01), w(0x02), w(0x03), w(0x04), w(0x05), w(0x06), w(0x07),\
++    w(0x08), w(0x09), w(0x0a), w(0x0b), w(0x0c), w(0x0d), w(0x0e), w(0x0f),\
++    w(0x10), w(0x11), w(0x12), w(0x13), w(0x14), w(0x15), w(0x16), w(0x17),\
++    w(0x18), w(0x19), w(0x1a), w(0x1b), w(0x1c), w(0x1d), w(0x1e), w(0x1f),\
++    w(0x20), w(0x21), w(0x22), w(0x23), w(0x24), w(0x25), w(0x26), w(0x27),\
++    w(0x28), w(0x29), w(0x2a), w(0x2b), w(0x2c), w(0x2d), w(0x2e), w(0x2f),\
++    w(0x30), w(0x31), w(0x32), w(0x33), w(0x34), w(0x35), w(0x36), w(0x37),\
++    w(0x38), w(0x39), w(0x3a), w(0x3b), w(0x3c), w(0x3d), w(0x3e), w(0x3f),\
++    w(0x40), w(0x41), w(0x42), w(0x43), w(0x44), w(0x45), w(0x46), w(0x47),\
++    w(0x48), w(0x49), w(0x4a), w(0x4b), w(0x4c), w(0x4d), w(0x4e), w(0x4f),\
++    w(0x50), w(0x51), w(0x52), w(0x53), w(0x54), w(0x55), w(0x56), w(0x57),\
++    w(0x58), w(0x59), w(0x5a), w(0x5b), w(0x5c), w(0x5d), w(0x5e), w(0x5f),\
++    w(0x60), w(0x61), w(0x62), w(0x63), w(0x64), w(0x65), w(0x66), w(0x67),\
++    w(0x68), w(0x69), w(0x6a), w(0x6b), w(0x6c), w(0x6d), w(0x6e), w(0x6f),\
++    w(0x70), w(0x71), w(0x72), w(0x73), w(0x74), w(0x75), w(0x76), w(0x77),\
++    w(0x78), w(0x79), w(0x7a), w(0x7b), w(0x7c), w(0x7d), w(0x7e), w(0x7f),\
++    w(0x80), w(0x81), w(0x82), w(0x83), w(0x84), w(0x85), w(0x86), w(0x87),\
++    w(0x88), w(0x89), w(0x8a), w(0x8b), w(0x8c), w(0x8d), w(0x8e), w(0x8f),\
++    w(0x90), w(0x91), w(0x92), w(0x93), w(0x94), w(0x95), w(0x96), w(0x97),\
++    w(0x98), w(0x99), w(0x9a), w(0x9b), w(0x9c), w(0x9d), w(0x9e), w(0x9f),\
++    w(0xa0), w(0xa1), w(0xa2), w(0xa3), w(0xa4), w(0xa5), w(0xa6), w(0xa7),\
++    w(0xa8), w(0xa9), w(0xaa), w(0xab), w(0xac), w(0xad), w(0xae), w(0xaf),\
++    w(0xb0), w(0xb1), w(0xb2), w(0xb3), w(0xb4), w(0xb5), w(0xb6), w(0xb7),\
++    w(0xb8), w(0xb9), w(0xba), w(0xbb), w(0xbc), w(0xbd), w(0xbe), w(0xbf),\
++    w(0xc0), w(0xc1), w(0xc2), w(0xc3), w(0xc4), w(0xc5), w(0xc6), w(0xc7),\
++    w(0xc8), w(0xc9), w(0xca), w(0xcb), w(0xcc), w(0xcd), w(0xce), w(0xcf),\
++    w(0xd0), w(0xd1), w(0xd2), w(0xd3), w(0xd4), w(0xd5), w(0xd6), w(0xd7),\
++    w(0xd8), w(0xd9), w(0xda), w(0xdb), w(0xdc), w(0xdd), w(0xde), w(0xdf),\
++    w(0xe0), w(0xe1), w(0xe2), w(0xe3), w(0xe4), w(0xe5), w(0xe6), w(0xe7),\
++    w(0xe8), w(0xe9), w(0xea), w(0xeb), w(0xec), w(0xed), w(0xee), w(0xef),\
++    w(0xf0), w(0xf1), w(0xf2), w(0xf3), w(0xf4), w(0xf5), w(0xf6), w(0xf7),\
++    w(0xf8), w(0xf9), w(0xfa), w(0xfb), w(0xfc), w(0xfd), w(0xfe), w(0xff) }
++
++static const uint8_t sbox[256]  =  sb_data(f1);
++
++#if defined( AES_DEC_PREKEYED )
++static const uint8_t isbox[256] = isb_data(f1);
++#endif
++
++static const uint8_t gfm2_sbox[256] = sb_data(f2);
++static const uint8_t gfm3_sbox[256] = sb_data(f3);
++
++#if defined( AES_DEC_PREKEYED )
++static const uint8_t gfmul_9[256] = mm_data(f9);
++static const uint8_t gfmul_b[256] = mm_data(fb);
++static const uint8_t gfmul_d[256] = mm_data(fd);
++static const uint8_t gfmul_e[256] = mm_data(fe);
++#endif
++
++#define s_box(x)     sbox[(x)]
++#if defined( AES_DEC_PREKEYED )
++#define is_box(x)    isbox[(x)]
++#endif
++#define gfm2_sb(x)   gfm2_sbox[(x)]
++#define gfm3_sb(x)   gfm3_sbox[(x)]
++#if defined( AES_DEC_PREKEYED )
++#define gfm_9(x)     gfmul_9[(x)]
++#define gfm_b(x)     gfmul_b[(x)]
++#define gfm_d(x)     gfmul_d[(x)]
++#define gfm_e(x)     gfmul_e[(x)]
++#endif
++#else
++
++/* this is the high bit of x right shifted by 1 */
++/* position. Since the starting polynomial has  */
++/* 9 bits (0x11b), this right shift keeps the   */
++/* values of all top bits within a byte         */
++
++static uint8_t hibit(const uint8_t x)
++{   uint8_t r = (uint8_t)((x >> 1) | (x >> 2));
++
++    r |= (r >> 2);
++    r |= (r >> 4);
++    return (r + 1) >> 1;
++}
++
++/* return the inverse of the finite field element x */
++
++static uint8_t gf_inv(const uint8_t x)
++{   uint8_t p1 = x, p2 = BPOLY, n1 = hibit(x), n2 = 0x80, v1 = 1, v2 = 0;
++
++    if(x < 2)
++        return x;
++
++    for( ; ; )
++    {
++        if(n1)
++            while(n2 >= n1)             /* divide polynomial p2 by p1    */
++            {
++                n2 /= n1;               /* shift smaller polynomial left */
++                p2 ^= (p1 * n2) & 0xff; /* and remove from larger one    */
++                v2 ^= (v1 * n2);        /* shift accumulated value and   */
++                n2 = hibit(p2);         /* add into result               */
++            }
++        else
++            return v1;
++
++        if(n2)                          /* repeat with values swapped    */
++            while(n1 >= n2)
++            {
++                n1 /= n2;
++                p1 ^= p2 * n1;
++                v1 ^= v2 * n1;
++                n1 = hibit(p1);
++            }
++        else
++            return v2;
++    }
++}
++
++/* The forward and inverse affine transformations used in the S-box */
++uint8_t fwd_affine(const uint8_t x)
++{
++#if defined( HAVE_UINT_32T )
++    uint32_t w = x;
++    w ^= (w << 1) ^ (w << 2) ^ (w << 3) ^ (w << 4);
++    return 0x63 ^ ((w ^ (w >> 8)) & 0xff);
++#else
++    return 0x63 ^ x ^ (x << 1) ^ (x << 2) ^ (x << 3) ^ (x << 4)
++                    ^ (x >> 7) ^ (x >> 6) ^ (x >> 5) ^ (x >> 4);
++#endif
++}
++
++uint8_t inv_affine(const uint8_t x)
++{
++#if defined( HAVE_UINT_32T )
++    uint32_t w = x;
++    w = (w << 1) ^ (w << 3) ^ (w << 6);
++    return 0x05 ^ ((w ^ (w >> 8)) & 0xff);
++#else
++    return 0x05 ^ (x << 1) ^ (x << 3) ^ (x << 6)
++                ^ (x >> 7) ^ (x >> 5) ^ (x >> 2);
++#endif
++}
++
++#define s_box(x)   fwd_affine(gf_inv(x))
++#define is_box(x)  gf_inv(inv_affine(x))
++#define gfm2_sb(x) f2(s_box(x))
++#define gfm3_sb(x) f3(s_box(x))
++#define gfm_9(x)   f9(x)
++#define gfm_b(x)   fb(x)
++#define gfm_d(x)   fd(x)
++#define gfm_e(x)   fe(x)
++
++#endif
++
++#if defined( HAVE_MEMCPY )
++#  define block_copy_nn(d, s, l)    memcpy(d, s, l)
++#  define block_copy(d, s)          memcpy(d, s, N_BLOCK)
++#else
++#  define block_copy_nn(d, s, l)    copy_block_nn(d, s, l)
++#  define block_copy(d, s)          copy_block(d, s)
++#endif
++
++static void copy_block( void *d, const void *s )
++{
++#if defined( HAVE_UINT_32T )
++    ((uint32_t*)d)[ 0] = ((uint32_t*)s)[ 0];
++    ((uint32_t*)d)[ 1] = ((uint32_t*)s)[ 1];
++    ((uint32_t*)d)[ 2] = ((uint32_t*)s)[ 2];
++    ((uint32_t*)d)[ 3] = ((uint32_t*)s)[ 3];
++#else
++    ((uint8_t*)d)[ 0] = ((uint8_t*)s)[ 0];
++    ((uint8_t*)d)[ 1] = ((uint8_t*)s)[ 1];
++    ((uint8_t*)d)[ 2] = ((uint8_t*)s)[ 2];
++    ((uint8_t*)d)[ 3] = ((uint8_t*)s)[ 3];
++    ((uint8_t*)d)[ 4] = ((uint8_t*)s)[ 4];
++    ((uint8_t*)d)[ 5] = ((uint8_t*)s)[ 5];
++    ((uint8_t*)d)[ 6] = ((uint8_t*)s)[ 6];
++    ((uint8_t*)d)[ 7] = ((uint8_t*)s)[ 7];
++    ((uint8_t*)d)[ 8] = ((uint8_t*)s)[ 8];
++    ((uint8_t*)d)[ 9] = ((uint8_t*)s)[ 9];
++    ((uint8_t*)d)[10] = ((uint8_t*)s)[10];
++    ((uint8_t*)d)[11] = ((uint8_t*)s)[11];
++    ((uint8_t*)d)[12] = ((uint8_t*)s)[12];
++    ((uint8_t*)d)[13] = ((uint8_t*)s)[13];
++    ((uint8_t*)d)[14] = ((uint8_t*)s)[14];
++    ((uint8_t*)d)[15] = ((uint8_t*)s)[15];
++#endif
++}
++
++static void copy_block_nn( uint8_t * d, const uint8_t *s, uint8_t nn )
++{
++    while( nn-- )
++        //*((uint8_t*)d)++ = *((uint8_t*)s)++;
++        *d++ = *s++;
++}
++
++static void xor_block( void *d, const void *s )
++{
++#if defined( HAVE_UINT_32T )
++    ((uint32_t*)d)[ 0] ^= ((uint32_t*)s)[ 0];
++    ((uint32_t*)d)[ 1] ^= ((uint32_t*)s)[ 1];
++    ((uint32_t*)d)[ 2] ^= ((uint32_t*)s)[ 2];
++    ((uint32_t*)d)[ 3] ^= ((uint32_t*)s)[ 3];
++#else
++    ((uint8_t*)d)[ 0] ^= ((uint8_t*)s)[ 0];
++    ((uint8_t*)d)[ 1] ^= ((uint8_t*)s)[ 1];
++    ((uint8_t*)d)[ 2] ^= ((uint8_t*)s)[ 2];
++    ((uint8_t*)d)[ 3] ^= ((uint8_t*)s)[ 3];
++    ((uint8_t*)d)[ 4] ^= ((uint8_t*)s)[ 4];
++    ((uint8_t*)d)[ 5] ^= ((uint8_t*)s)[ 5];
++    ((uint8_t*)d)[ 6] ^= ((uint8_t*)s)[ 6];
++    ((uint8_t*)d)[ 7] ^= ((uint8_t*)s)[ 7];
++    ((uint8_t*)d)[ 8] ^= ((uint8_t*)s)[ 8];
++    ((uint8_t*)d)[ 9] ^= ((uint8_t*)s)[ 9];
++    ((uint8_t*)d)[10] ^= ((uint8_t*)s)[10];
++    ((uint8_t*)d)[11] ^= ((uint8_t*)s)[11];
++    ((uint8_t*)d)[12] ^= ((uint8_t*)s)[12];
++    ((uint8_t*)d)[13] ^= ((uint8_t*)s)[13];
++    ((uint8_t*)d)[14] ^= ((uint8_t*)s)[14];
++    ((uint8_t*)d)[15] ^= ((uint8_t*)s)[15];
++#endif
++}
++
++static void copy_and_key( void *d, const void *s, const void *k )
++{
++#if defined( HAVE_UINT_32T )
++    ((uint32_t*)d)[ 0] = ((uint32_t*)s)[ 0] ^ ((uint32_t*)k)[ 0];
++    ((uint32_t*)d)[ 1] = ((uint32_t*)s)[ 1] ^ ((uint32_t*)k)[ 1];
++    ((uint32_t*)d)[ 2] = ((uint32_t*)s)[ 2] ^ ((uint32_t*)k)[ 2];
++    ((uint32_t*)d)[ 3] = ((uint32_t*)s)[ 3] ^ ((uint32_t*)k)[ 3];
++#elif 1
++    ((uint8_t*)d)[ 0] = ((uint8_t*)s)[ 0] ^ ((uint8_t*)k)[ 0];
++    ((uint8_t*)d)[ 1] = ((uint8_t*)s)[ 1] ^ ((uint8_t*)k)[ 1];
++    ((uint8_t*)d)[ 2] = ((uint8_t*)s)[ 2] ^ ((uint8_t*)k)[ 2];
++    ((uint8_t*)d)[ 3] = ((uint8_t*)s)[ 3] ^ ((uint8_t*)k)[ 3];
++    ((uint8_t*)d)[ 4] = ((uint8_t*)s)[ 4] ^ ((uint8_t*)k)[ 4];
++    ((uint8_t*)d)[ 5] = ((uint8_t*)s)[ 5] ^ ((uint8_t*)k)[ 5];
++    ((uint8_t*)d)[ 6] = ((uint8_t*)s)[ 6] ^ ((uint8_t*)k)[ 6];
++    ((uint8_t*)d)[ 7] = ((uint8_t*)s)[ 7] ^ ((uint8_t*)k)[ 7];
++    ((uint8_t*)d)[ 8] = ((uint8_t*)s)[ 8] ^ ((uint8_t*)k)[ 8];
++    ((uint8_t*)d)[ 9] = ((uint8_t*)s)[ 9] ^ ((uint8_t*)k)[ 9];
++    ((uint8_t*)d)[10] = ((uint8_t*)s)[10] ^ ((uint8_t*)k)[10];
++    ((uint8_t*)d)[11] = ((uint8_t*)s)[11] ^ ((uint8_t*)k)[11];
++    ((uint8_t*)d)[12] = ((uint8_t*)s)[12] ^ ((uint8_t*)k)[12];
++    ((uint8_t*)d)[13] = ((uint8_t*)s)[13] ^ ((uint8_t*)k)[13];
++    ((uint8_t*)d)[14] = ((uint8_t*)s)[14] ^ ((uint8_t*)k)[14];
++    ((uint8_t*)d)[15] = ((uint8_t*)s)[15] ^ ((uint8_t*)k)[15];
++#else
++    block_copy(d, s);
++    xor_block(d, k);
++#endif
++}
++
++static void add_round_key( uint8_t d[N_BLOCK], const uint8_t k[N_BLOCK] )
++{
++    xor_block(d, k);
++}
++
++static void shift_sub_rows( uint8_t st[N_BLOCK] )
++{   uint8_t tt;
++
++    st[ 0] = s_box(st[ 0]); st[ 4] = s_box(st[ 4]);
++    st[ 8] = s_box(st[ 8]); st[12] = s_box(st[12]);
++
++    tt = st[1]; st[ 1] = s_box(st[ 5]); st[ 5] = s_box(st[ 9]);
++    st[ 9] = s_box(st[13]); st[13] = s_box( tt );
++
++    tt = st[2]; st[ 2] = s_box(st[10]); st[10] = s_box( tt );
++    tt = st[6]; st[ 6] = s_box(st[14]); st[14] = s_box( tt );
++
++    tt = st[15]; st[15] = s_box(st[11]); st[11] = s_box(st[ 7]);
++    st[ 7] = s_box(st[ 3]); st[ 3] = s_box( tt );
++}
++
++#if defined( AES_DEC_PREKEYED )
++
++static void inv_shift_sub_rows( uint8_t st[N_BLOCK] )
++{   uint8_t tt;
++
++    st[ 0] = is_box(st[ 0]); st[ 4] = is_box(st[ 4]);
++    st[ 8] = is_box(st[ 8]); st[12] = is_box(st[12]);
++
++    tt = st[13]; st[13] = is_box(st[9]); st[ 9] = is_box(st[5]);
++    st[ 5] = is_box(st[1]); st[ 1] = is_box( tt );
++
++    tt = st[2]; st[ 2] = is_box(st[10]); st[10] = is_box( tt );
++    tt = st[6]; st[ 6] = is_box(st[14]); st[14] = is_box( tt );
++
++    tt = st[3]; st[ 3] = is_box(st[ 7]); st[ 7] = is_box(st[11]);
++    st[11] = is_box(st[15]); st[15] = is_box( tt );
++}
++
++#endif
++
++#if defined( VERSION_1 )
++  static void mix_sub_columns( uint8_t dt[N_BLOCK] )
++  { uint8_t st[N_BLOCK];
++    block_copy(st, dt);
++#else
++  static void mix_sub_columns( uint8_t dt[N_BLOCK], uint8_t st[N_BLOCK] )
++  {
++#endif
++    dt[ 0] = gfm2_sb(st[0]) ^ gfm3_sb(st[5]) ^ s_box(st[10]) ^ s_box(st[15]);
++    dt[ 1] = s_box(st[0]) ^ gfm2_sb(st[5]) ^ gfm3_sb(st[10]) ^ s_box(st[15]);
++    dt[ 2] = s_box(st[0]) ^ s_box(st[5]) ^ gfm2_sb(st[10]) ^ gfm3_sb(st[15]);
++    dt[ 3] = gfm3_sb(st[0]) ^ s_box(st[5]) ^ s_box(st[10]) ^ gfm2_sb(st[15]);
++
++    dt[ 4] = gfm2_sb(st[4]) ^ gfm3_sb(st[9]) ^ s_box(st[14]) ^ s_box(st[3]);
++    dt[ 5] = s_box(st[4]) ^ gfm2_sb(st[9]) ^ gfm3_sb(st[14]) ^ s_box(st[3]);
++    dt[ 6] = s_box(st[4]) ^ s_box(st[9]) ^ gfm2_sb(st[14]) ^ gfm3_sb(st[3]);
++    dt[ 7] = gfm3_sb(st[4]) ^ s_box(st[9]) ^ s_box(st[14]) ^ gfm2_sb(st[3]);
++
++    dt[ 8] = gfm2_sb(st[8]) ^ gfm3_sb(st[13]) ^ s_box(st[2]) ^ s_box(st[7]);
++    dt[ 9] = s_box(st[8]) ^ gfm2_sb(st[13]) ^ gfm3_sb(st[2]) ^ s_box(st[7]);
++    dt[10] = s_box(st[8]) ^ s_box(st[13]) ^ gfm2_sb(st[2]) ^ gfm3_sb(st[7]);
++    dt[11] = gfm3_sb(st[8]) ^ s_box(st[13]) ^ s_box(st[2]) ^ gfm2_sb(st[7]);
++
++    dt[12] = gfm2_sb(st[12]) ^ gfm3_sb(st[1]) ^ s_box(st[6]) ^ s_box(st[11]);
++    dt[13] = s_box(st[12]) ^ gfm2_sb(st[1]) ^ gfm3_sb(st[6]) ^ s_box(st[11]);
++    dt[14] = s_box(st[12]) ^ s_box(st[1]) ^ gfm2_sb(st[6]) ^ gfm3_sb(st[11]);
++    dt[15] = gfm3_sb(st[12]) ^ s_box(st[1]) ^ s_box(st[6]) ^ gfm2_sb(st[11]);
++  }
++
++#if defined( AES_DEC_PREKEYED )
++
++#if defined( VERSION_1 )
++  static void inv_mix_sub_columns( uint8_t dt[N_BLOCK] )
++  { uint8_t st[N_BLOCK];
++    block_copy(st, dt);
++#else
++  static void inv_mix_sub_columns( uint8_t dt[N_BLOCK], uint8_t st[N_BLOCK] )
++  {
++#endif
++    dt[ 0] = is_box(gfm_e(st[ 0]) ^ gfm_b(st[ 1]) ^ gfm_d(st[ 2]) ^ gfm_9(st[ 3]));
++    dt[ 5] = is_box(gfm_9(st[ 0]) ^ gfm_e(st[ 1]) ^ gfm_b(st[ 2]) ^ gfm_d(st[ 3]));
++    dt[10] = is_box(gfm_d(st[ 0]) ^ gfm_9(st[ 1]) ^ gfm_e(st[ 2]) ^ gfm_b(st[ 3]));
++    dt[15] = is_box(gfm_b(st[ 0]) ^ gfm_d(st[ 1]) ^ gfm_9(st[ 2]) ^ gfm_e(st[ 3]));
++
++    dt[ 4] = is_box(gfm_e(st[ 4]) ^ gfm_b(st[ 5]) ^ gfm_d(st[ 6]) ^ gfm_9(st[ 7]));
++    dt[ 9] = is_box(gfm_9(st[ 4]) ^ gfm_e(st[ 5]) ^ gfm_b(st[ 6]) ^ gfm_d(st[ 7]));
++    dt[14] = is_box(gfm_d(st[ 4]) ^ gfm_9(st[ 5]) ^ gfm_e(st[ 6]) ^ gfm_b(st[ 7]));
++    dt[ 3] = is_box(gfm_b(st[ 4]) ^ gfm_d(st[ 5]) ^ gfm_9(st[ 6]) ^ gfm_e(st[ 7]));
++
++    dt[ 8] = is_box(gfm_e(st[ 8]) ^ gfm_b(st[ 9]) ^ gfm_d(st[10]) ^ gfm_9(st[11]));
++    dt[13] = is_box(gfm_9(st[ 8]) ^ gfm_e(st[ 9]) ^ gfm_b(st[10]) ^ gfm_d(st[11]));
++    dt[ 2] = is_box(gfm_d(st[ 8]) ^ gfm_9(st[ 9]) ^ gfm_e(st[10]) ^ gfm_b(st[11]));
++    dt[ 7] = is_box(gfm_b(st[ 8]) ^ gfm_d(st[ 9]) ^ gfm_9(st[10]) ^ gfm_e(st[11]));
++
++    dt[12] = is_box(gfm_e(st[12]) ^ gfm_b(st[13]) ^ gfm_d(st[14]) ^ gfm_9(st[15]));
++    dt[ 1] = is_box(gfm_9(st[12]) ^ gfm_e(st[13]) ^ gfm_b(st[14]) ^ gfm_d(st[15]));
++    dt[ 6] = is_box(gfm_d(st[12]) ^ gfm_9(st[13]) ^ gfm_e(st[14]) ^ gfm_b(st[15]));
++    dt[11] = is_box(gfm_b(st[12]) ^ gfm_d(st[13]) ^ gfm_9(st[14]) ^ gfm_e(st[15]));
++  }
++
++#endif
++
++#if defined( AES_ENC_PREKEYED ) || defined( AES_DEC_PREKEYED )
++
++/*  Set the cipher key for the pre-keyed version */
++
++return_type aes_set_key( const uint8_t key[], length_type keylen, aes_context ctx[1] )
++{
++    uint8_t cc, rc, hi;
++
++    switch( keylen )
++    {
++    case 16:
++    case 24:
++    case 32:
++        break;
++    default:
++        ctx->rnd = 0;
++        return ( uint8_t )-1;
++    }
++    block_copy_nn(ctx->ksch, key, keylen);
++    hi = (keylen + 28) << 2;
++    ctx->rnd = (hi >> 4) - 1;
++    for( cc = keylen, rc = 1; cc < hi; cc += 4 )
++    {   uint8_t tt, t0, t1, t2, t3;
++
++        t0 = ctx->ksch[cc - 4];
++        t1 = ctx->ksch[cc - 3];
++        t2 = ctx->ksch[cc - 2];
++        t3 = ctx->ksch[cc - 1];
++        if( cc % keylen == 0 )
++        {
++            tt = t0;
++            t0 = s_box(t1) ^ rc;
++            t1 = s_box(t2);
++            t2 = s_box(t3);
++            t3 = s_box(tt);
++            rc = f2(rc);
++        }
++        else if( keylen > 24 && cc % keylen == 16 )
++        {
++            t0 = s_box(t0);
++            t1 = s_box(t1);
++            t2 = s_box(t2);
++            t3 = s_box(t3);
++        }
++        tt = cc - keylen;
++        ctx->ksch[cc + 0] = ctx->ksch[tt + 0] ^ t0;
++        ctx->ksch[cc + 1] = ctx->ksch[tt + 1] ^ t1;
++        ctx->ksch[cc + 2] = ctx->ksch[tt + 2] ^ t2;
++        ctx->ksch[cc + 3] = ctx->ksch[tt + 3] ^ t3;
++    }
++    return 0;
++}
++
++#endif
++
++#if defined( AES_ENC_PREKEYED )
++
++/*  Encrypt a single block of 16 bytes */
++
++return_type aes_encrypt( const uint8_t in[N_BLOCK], uint8_t  out[N_BLOCK], const aes_context ctx[1] )
++{
++    if( ctx->rnd )
++    {
++        uint8_t s1[N_BLOCK], r;
++        copy_and_key( s1, in, ctx->ksch );
++
++        for( r = 1 ; r < ctx->rnd ; ++r )
++#if defined( VERSION_1 )
++        {
++            mix_sub_columns( s1 );
++            add_round_key( s1, ctx->ksch + r * N_BLOCK);
++        }
++#else
++        {   uint8_t s2[N_BLOCK];
++            mix_sub_columns( s2, s1 );
++            copy_and_key( s1, s2, ctx->ksch + r * N_BLOCK);
++        }
++#endif
++        shift_sub_rows( s1 );
++        copy_and_key( out, s1, ctx->ksch + r * N_BLOCK );
++    }
++    else
++        return ( uint8_t )-1;
++    return 0;
++}
++
++/* CBC encrypt a number of blocks (input and return an IV) */
++
++return_type aes_cbc_encrypt( const uint8_t *in, uint8_t *out,
++                         int32_t n_block, uint8_t iv[N_BLOCK], const aes_context ctx[1] )
++{
++
++    while(n_block--)
++    {
++        xor_block(iv, in);
++        if(aes_encrypt(iv, iv, ctx) != EXIT_SUCCESS)
++            return EXIT_FAILURE;
++        //memcpy(out, iv, N_BLOCK);
++        block_copy(out, iv);
++        in += N_BLOCK;
++        out += N_BLOCK;
++    }
++    return EXIT_SUCCESS;
++}
++
++#endif
++
++#if defined( AES_DEC_PREKEYED )
++
++/*  Decrypt a single block of 16 bytes */
++
++return_type aes_decrypt( const uint8_t in[N_BLOCK], uint8_t out[N_BLOCK], const aes_context ctx[1] )
++{
++    if( ctx->rnd )
++    {
++        uint8_t s1[N_BLOCK], r;
++        copy_and_key( s1, in, ctx->ksch + ctx->rnd * N_BLOCK );
++        inv_shift_sub_rows( s1 );
++
++        for( r = ctx->rnd ; --r ; )
++#if defined( VERSION_1 )
++        {
++            add_round_key( s1, ctx->ksch + r * N_BLOCK );
++            inv_mix_sub_columns( s1 );
++        }
++#else
++        {   uint8_t s2[N_BLOCK];
++            copy_and_key( s2, s1, ctx->ksch + r * N_BLOCK );
++            inv_mix_sub_columns( s1, s2 );
++        }
++#endif
++        copy_and_key( out, s1, ctx->ksch );
++    }
++    else
++        return -1;
++    return 0;
++}
++
++/* CBC decrypt a number of blocks (input and return an IV) */
++
++return_type aes_cbc_decrypt( const uint8_t *in, uint8_t *out,
++                         int32_t n_block, uint8_t iv[N_BLOCK], const aes_context ctx[1] )
++{
++    while(n_block--)
++    {   uint8_t tmp[N_BLOCK];
++
++        //memcpy(tmp, in, N_BLOCK);
++        block_copy(tmp, in);
++        if(aes_decrypt(in, out, ctx) != EXIT_SUCCESS)
++            return EXIT_FAILURE;
++        xor_block(out, iv);
++        //memcpy(iv, tmp, N_BLOCK);
++        block_copy(iv, tmp);
++        in += N_BLOCK;
++        out += N_BLOCK;
++    }
++    return EXIT_SUCCESS;
++}
++
++#endif
++
++#if defined( AES_ENC_128_OTFK )
++
++/*  The 'on the fly' encryption key update for for 128 bit keys */
++
++static void update_encrypt_key_128( uint8_t k[N_BLOCK], uint8_t *rc )
++{   uint8_t cc;
++
++    k[0] ^= s_box(k[13]) ^ *rc;
++    k[1] ^= s_box(k[14]);
++    k[2] ^= s_box(k[15]);
++    k[3] ^= s_box(k[12]);
++    *rc = f2( *rc );
++
++    for(cc = 4; cc < 16; cc += 4 )
++    {
++        k[cc + 0] ^= k[cc - 4];
++        k[cc + 1] ^= k[cc - 3];
++        k[cc + 2] ^= k[cc - 2];
++        k[cc + 3] ^= k[cc - 1];
++    }
++}
++
++/*  Encrypt a single block of 16 bytes with 'on the fly' 128 bit keying */
++
++void aes_encrypt_128( const uint8_t in[N_BLOCK], uint8_t out[N_BLOCK],
++                     const uint8_t key[N_BLOCK], uint8_t o_key[N_BLOCK] )
++{   uint8_t s1[N_BLOCK], r, rc = 1;
++
++    if(o_key != key)
++        block_copy( o_key, key );
++    copy_and_key( s1, in, o_key );
++
++    for( r = 1 ; r < 10 ; ++r )
++#if defined( VERSION_1 )
++    {
++        mix_sub_columns( s1 );
++        update_encrypt_key_128( o_key, &rc );
++        add_round_key( s1, o_key );
++    }
++#else
++    {   uint8_t s2[N_BLOCK];
++        mix_sub_columns( s2, s1 );
++        update_encrypt_key_128( o_key, &rc );
++        copy_and_key( s1, s2, o_key );
++    }
++#endif
++
++    shift_sub_rows( s1 );
++    update_encrypt_key_128( o_key, &rc );
++    copy_and_key( out, s1, o_key );
++}
++
++#endif
++
++#if defined( AES_DEC_128_OTFK )
++
++/*  The 'on the fly' decryption key update for for 128 bit keys */
++
++static void update_decrypt_key_128( uint8_t k[N_BLOCK], uint8_t *rc )
++{   uint8_t cc;
++
++    for( cc = 12; cc > 0; cc -= 4 )
++    {
++        k[cc + 0] ^= k[cc - 4];
++        k[cc + 1] ^= k[cc - 3];
++        k[cc + 2] ^= k[cc - 2];
++        k[cc + 3] ^= k[cc - 1];
++    }
++    *rc = d2(*rc);
++    k[0] ^= s_box(k[13]) ^ *rc;
++    k[1] ^= s_box(k[14]);
++    k[2] ^= s_box(k[15]);
++    k[3] ^= s_box(k[12]);
++}
++
++/*  Decrypt a single block of 16 bytes with 'on the fly' 128 bit keying */
++
++void aes_decrypt_128( const uint8_t in[N_BLOCK], uint8_t out[N_BLOCK],
++                      const uint8_t key[N_BLOCK], uint8_t o_key[N_BLOCK] )
++{
++    uint8_t s1[N_BLOCK], r, rc = 0x6c;
++    if(o_key != key)
++        block_copy( o_key, key );
++
++    copy_and_key( s1, in, o_key );
++    inv_shift_sub_rows( s1 );
++
++    for( r = 10 ; --r ; )
++#if defined( VERSION_1 )
++    {
++        update_decrypt_key_128( o_key, &rc );
++        add_round_key( s1, o_key );
++        inv_mix_sub_columns( s1 );
++    }
++#else
++    {   uint8_t s2[N_BLOCK];
++        update_decrypt_key_128( o_key, &rc );
++        copy_and_key( s2, s1, o_key );
++        inv_mix_sub_columns( s1, s2 );
++    }
++#endif
++    update_decrypt_key_128( o_key, &rc );
++    copy_and_key( out, s1, o_key );
++}
++
++#endif
++
++#if defined( AES_ENC_256_OTFK )
++
++/*  The 'on the fly' encryption key update for for 256 bit keys */
++
++static void update_encrypt_key_256( uint8_t k[2 * N_BLOCK], uint8_t *rc )
++{   uint8_t cc;
++
++    k[0] ^= s_box(k[29]) ^ *rc;
++    k[1] ^= s_box(k[30]);
++    k[2] ^= s_box(k[31]);
++    k[3] ^= s_box(k[28]);
++    *rc = f2( *rc );
++
++    for(cc = 4; cc < 16; cc += 4)
++    {
++        k[cc + 0] ^= k[cc - 4];
++        k[cc + 1] ^= k[cc - 3];
++        k[cc + 2] ^= k[cc - 2];
++        k[cc + 3] ^= k[cc - 1];
++    }
++
++    k[16] ^= s_box(k[12]);
++    k[17] ^= s_box(k[13]);
++    k[18] ^= s_box(k[14]);
++    k[19] ^= s_box(k[15]);
++
++    for( cc = 20; cc < 32; cc += 4 )
++    {
++        k[cc + 0] ^= k[cc - 4];
++        k[cc + 1] ^= k[cc - 3];
++        k[cc + 2] ^= k[cc - 2];
++        k[cc + 3] ^= k[cc - 1];
++    }
++}
++
++/*  Encrypt a single block of 16 bytes with 'on the fly' 256 bit keying */
++
++void aes_encrypt_256( const uint8_t in[N_BLOCK], uint8_t out[N_BLOCK],
++                      const uint8_t key[2 * N_BLOCK], uint8_t o_key[2 * N_BLOCK] )
++{
++    uint8_t s1[N_BLOCK], r, rc = 1;
++    if(o_key != key)
++    {
++        block_copy( o_key, key );
++        block_copy( o_key + 16, key + 16 );
++    }
++    copy_and_key( s1, in, o_key );
++
++    for( r = 1 ; r < 14 ; ++r )
++#if defined( VERSION_1 )
++    {
++        mix_sub_columns(s1);
++        if( r & 1 )
++            add_round_key( s1, o_key + 16 );
++        else
++        {
++            update_encrypt_key_256( o_key, &rc );
++            add_round_key( s1, o_key );
++        }
++    }
++#else
++    {   uint8_t s2[N_BLOCK];
++        mix_sub_columns( s2, s1 );
++        if( r & 1 )
++            copy_and_key( s1, s2, o_key + 16 );
++        else
++        {
++            update_encrypt_key_256( o_key, &rc );
++            copy_and_key( s1, s2, o_key );
++        }
++    }
++#endif
++
++    shift_sub_rows( s1 );
++    update_encrypt_key_256( o_key, &rc );
++    copy_and_key( out, s1, o_key );
++}
++
++#endif
++
++#if defined( AES_DEC_256_OTFK )
++
++/*  The 'on the fly' encryption key update for for 256 bit keys */
++
++static void update_decrypt_key_256( uint8_t k[2 * N_BLOCK], uint8_t *rc )
++{   uint8_t cc;
++
++    for(cc = 28; cc > 16; cc -= 4)
++    {
++        k[cc + 0] ^= k[cc - 4];
++        k[cc + 1] ^= k[cc - 3];
++        k[cc + 2] ^= k[cc - 2];
++        k[cc + 3] ^= k[cc - 1];
++    }
++
++    k[16] ^= s_box(k[12]);
++    k[17] ^= s_box(k[13]);
++    k[18] ^= s_box(k[14]);
++    k[19] ^= s_box(k[15]);
++
++    for(cc = 12; cc > 0; cc -= 4)
++    {
++        k[cc + 0] ^= k[cc - 4];
++        k[cc + 1] ^= k[cc - 3];
++        k[cc + 2] ^= k[cc - 2];
++        k[cc + 3] ^= k[cc - 1];
++    }
++
++    *rc = d2(*rc);
++    k[0] ^= s_box(k[29]) ^ *rc;
++    k[1] ^= s_box(k[30]);
++    k[2] ^= s_box(k[31]);
++    k[3] ^= s_box(k[28]);
++}
++
++/*  Decrypt a single block of 16 bytes with 'on the fly'
++    256 bit keying
++*/
++void aes_decrypt_256( const uint8_t in[N_BLOCK], uint8_t out[N_BLOCK],
++                      const uint8_t key[2 * N_BLOCK], uint8_t o_key[2 * N_BLOCK] )
++{
++    uint8_t s1[N_BLOCK], r, rc = 0x80;
++
++    if(o_key != key)
++    {
++        block_copy( o_key, key );
++        block_copy( o_key + 16, key + 16 );
++    }
++
++    copy_and_key( s1, in, o_key );
++    inv_shift_sub_rows( s1 );
++
++    for( r = 14 ; --r ; )
++#if defined( VERSION_1 )
++    {
++        if( ( r & 1 ) )
++        {
++            update_decrypt_key_256( o_key, &rc );
++            add_round_key( s1, o_key + 16 );
++        }
++        else
++            add_round_key( s1, o_key );
++        inv_mix_sub_columns( s1 );
++    }
++#else
++    {   uint8_t s2[N_BLOCK];
++        if( ( r & 1 ) )
++        {
++            update_decrypt_key_256( o_key, &rc );
++            copy_and_key( s2, s1, o_key + 16 );
++        }
++        else
++            copy_and_key( s2, s1, o_key );
++        inv_mix_sub_columns( s1, s2 );
++    }
++#endif
++    copy_and_key( out, s1, o_key );
++}
++
++#endif
+diff --git a/lora_pkt_fwd/src/cmac.c b/lora_pkt_fwd/src/cmac.c
+new file mode 100755
+index 0000000..ad79379
+--- /dev/null
++++ b/lora_pkt_fwd/src/cmac.c
+@@ -0,0 +1,154 @@
++/**************************************************************************
++Copyright (C) 2009 Lander Casado, Philippas Tsigas
++
++All rights reserved.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of this software and associated documentation files 
++(the "Software"), to deal with the Software without restriction, including
++without limitation the rights to use, copy, modify, merge, publish, 
++distribute, sublicense, and/or sell copies of the Software, and to
++permit persons to whom the Software is furnished to do so, subject to
++the following conditions: 
++
++Redistributions of source code must retain the above copyright notice, 
++this list of conditions and the following disclaimers. Redistributions in
++binary form must reproduce the above copyright notice, this list of
++conditions and the following disclaimers in the documentation and/or 
++other materials provided with the distribution.
++
++In no event shall the authors or copyright holders be liable for any special,
++incidental, indirect or consequential damages of any kind, or any damages 
++whatsoever resulting from loss of use, data or profits, whether or not 
++advised of the possibility of damage, and on any theory of liability, 
++arising out of or in connection with the use or performance of this software.
++ 
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
++FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
++DEALINGS WITH THE SOFTWARE
++
++*****************************************************************************/
++#include <stdint.h>
++#include <string.h>
++#include "aes.h"
++#include "cmac.h"
++
++#define LSHIFT(v, r) do {                                       \
++  int32_t i;                                                  \
++           for (i = 0; i < 15; i++)                                \
++                    (r)[i] = (v)[i] << 1 | (v)[i + 1] >> 7;         \
++            (r)[15] = (v)[15] << 1;                                 \
++    } while (0)
++    
++#define XOR(v, r) do {                                          \
++            int32_t i;                                                  \
++            for (i = 0; i < 16; i++)     \
++        {   \
++                    (r)[i] = (r)[i] ^ (v)[i]; \
++        }                          \
++    } while (0) \
++
++
++#define MIN( a, b ) ( ( ( a ) < ( b ) ) ? ( a ) : ( b ) )
++
++
++void AES_CMAC_Init(AES_CMAC_CTX *ctx)
++{
++            memset(ctx->X, 0, sizeof ctx->X);
++            ctx->M_n = 0;
++        memset(ctx->rijndael.ksch, '\0', 240);
++}
++    
++void AES_CMAC_SetKey(AES_CMAC_CTX *ctx, const uint8_t key[AES_CMAC_KEY_LENGTH])
++{
++           //rijndael_set_key_enc_only(&ctx->rijndael, key, 128);
++       aes_set_key( key, AES_CMAC_KEY_LENGTH, &ctx->rijndael);
++}
++    
++void AES_CMAC_Update(AES_CMAC_CTX *ctx, const uint8_t *data, uint32_t len)
++{
++            uint32_t mlen;
++        uint8_t in[16];
++    
++            if (ctx->M_n > 0) {
++                  mlen = MIN(16 - ctx->M_n, len);
++                    memcpy(ctx->M_last + ctx->M_n, data, mlen);
++                    ctx->M_n += mlen;
++                    if (ctx->M_n < 16 || len == mlen)
++                            return;
++                   XOR(ctx->M_last, ctx->X);
++                    //rijndael_encrypt(&ctx->rijndael, ctx->X, ctx->X);
++            aes_encrypt( ctx->X, ctx->X, &ctx->rijndael);
++                    data += mlen;
++                    len -= mlen;
++            }
++            while (len > 16) {      /* not last block */
++
++                    XOR(data, ctx->X);
++                    //rijndael_encrypt(&ctx->rijndael, ctx->X, ctx->X);
++
++                    memcpy(in, &ctx->X[0], 16); //Bestela ez du ondo iten
++            aes_encrypt( in, in, &ctx->rijndael);
++                    memcpy(&ctx->X[0], in, 16);
++
++                    data += 16;
++                    len -= 16;
++            }
++            /* potential last block, save it */
++            memcpy(ctx->M_last, data, len);
++            ctx->M_n = len;
++}
++   
++void AES_CMAC_Final(uint8_t digest[AES_CMAC_DIGEST_LENGTH], AES_CMAC_CTX *ctx)
++{
++            uint8_t K[16];
++        uint8_t in[16];
++            /* generate subkey K1 */
++            memset(K, '\0', 16);
++
++            //rijndael_encrypt(&ctx->rijndael, K, K);
++
++            aes_encrypt( K, K, &ctx->rijndael);
++
++            if (K[0] & 0x80) {
++                    LSHIFT(K, K);
++                   K[15] ^= 0x87;
++            } else
++                    LSHIFT(K, K);
++
++
++            if (ctx->M_n == 16) {
++                    /* last block was a complete block */
++                    XOR(K, ctx->M_last);
++
++           } else {
++                   /* generate subkey K2 */
++                  if (K[0] & 0x80) {
++                          LSHIFT(K, K);
++                          K[15] ^= 0x87;
++                  } else
++                           LSHIFT(K, K);
++
++                   /* padding(M_last) */
++                   ctx->M_last[ctx->M_n] = 0x80;
++                   while (++ctx->M_n < 16)
++                         ctx->M_last[ctx->M_n] = 0;
++   
++                  XOR(K, ctx->M_last);
++
++
++           }
++           XOR(ctx->M_last, ctx->X);
++
++           //rijndael_encrypt(&ctx->rijndael, ctx->X, digest);
++
++       memcpy(in, &ctx->X[0], 16); //Bestela ez du ondo iten
++       aes_encrypt(in, digest, &ctx->rijndael);
++           memset(K, 0, sizeof K);
++
++}
++
+diff --git a/lora_pkt_fwd/src/lora_pkt_fwd.c b/lora_pkt_fwd/src/lora_pkt_fwd.c
+index 966cb78..e753e57 100755
+--- a/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -56,6 +56,9 @@ Maintainer: Michael Coracin
+ #include "loragw_gps.h"
+ #include "loragw_aux.h"
+ #include "loragw_reg.h"
++/* Begin add for lora time sync */
++#include "lora_timesync.h"
++/* End */
+ 
+ /* Begin add for packet filtering by whitelist and blacklist */
+ #include "filter_node.h"
+@@ -82,7 +85,9 @@ Maintainer: Michael Coracin
+ #define DEFAULT_STAT        30          /* default time interval for statistics */
+ #define PUSH_TIMEOUT_MS     100
+ #define PULL_TIMEOUT_MS     200
+-#define GPS_REF_MAX_AGE     30          /* maximum admitted delay in seconds of GPS loss before considering latest GPS sync unusable */
++/* Begin add for lora time sync */
++#define GPS_REF_MAX_AGE     600         /* maximum admitted delay in seconds of GPS loss before considering latest GPS sync unusable */
++/* End */
+ #define FETCH_SLEEP_MS      10          /* nb of ms waited when a fetch return no packets */
+ #define BEACON_POLL_MS      50          /* time in ms between polling of beacon TX status */
+ 
+@@ -167,9 +172,15 @@ static int gps_tty_fd = -1; /* file descriptor of the GPS TTY port */
+ static bool gps_enabled = false; /* is GPS enabled on that gateway ? */
+ 
+ /* GPS time reference */
+-static pthread_mutex_t mx_timeref = PTHREAD_MUTEX_INITIALIZER; /* control access to GPS time reference */
+-static bool gps_ref_valid; /* is GPS reference acceptable (ie. not too old) */
+-static struct tref time_reference_gps; /* time reference used for GPS <-> timestamp conversion */
++/* Begin add for lora time sync */
++#if defined(USE_LORA_TIME_SYNC)
++bool utc_ref_valid = false;
++bool lora_ref_valid = false;
++#endif
++pthread_mutex_t mx_timeref = PTHREAD_MUTEX_INITIALIZER; /* control access to GPS time reference */
++bool gps_ref_valid; /* is GPS reference acceptable (ie. not too old) */
++struct tref time_reference_gps; /* time reference used for GPS <-> timestamp conversion */
++/* End */
+ 
+ /* Reference coordinates, for broadcasting (beacon) */
+ static struct coord_s reference_coord;
+@@ -207,13 +218,19 @@ static uint32_t meas_nb_beacon_sent = 0; /* count beacon actually sent to concen
+ static uint32_t meas_nb_beacon_rejected = 0; /* count beacon rejected for queuing */
+ 
+ /* Begin add for reset when no ack in specify time */
+-/* default count timeout of status packets had send but no ackstatus packets */ 
++/* default count timeout of status packets had send but no ack */ 
+ #define DEFAULT_STAT_NO_ACK_TIMEOUT     60
+ static pthread_mutex_t mx_stat_no_ack = PTHREAD_MUTEX_INITIALIZER;
+ static uint32_t stat_no_ack_timeout = DEFAULT_STAT_NO_ACK_TIMEOUT;
+ static uint32_t stat_no_ack_cnt = 0;
+ /* End */
+ 
++/* Begin add for lora time sync */
++#if defined(USE_LORA_TIME_SYNC)
++uint32_t lora_timesync_freq_hz = 471900000;
++#endif
++/* End */
++
+ static pthread_mutex_t mx_meas_gps = PTHREAD_MUTEX_INITIALIZER; /* control access to the GPS statistics */
+ static bool gps_coord_valid; /* could we get valid GPS coordinates ? */
+ static struct coord_s meas_gps_coord; /* GPS position of the gateway */
+@@ -237,7 +254,9 @@ static uint8_t beacon_infodesc = DEFAULT_BEACON_INFODESC; /* set beacon informat
+ static uint32_t autoquit_threshold = 0; /* enable auto-quit after a number of non-acknowledged PULL_DATA (0 = disabled)*/
+ 
+ /* Just In Time TX scheduling */
+-static struct jit_queue_s jit_queue;
++/* Begin add for lora time sync */
++struct jit_queue_s jit_queue;
++/* End */
+ 
+ /* Gateway specificities */
+ static int8_t antenna_gain = 0;
+@@ -288,6 +307,12 @@ extern int get_cpu_ratio(float* cpu_ratio);
+ extern int get_mem_ratio(float* mem_ratio);
+ // End
+ 
++/* Begin add for lora time sync */
++#if defined(USE_LORA_TIME_SYNC)
++extern void thread_ntp_time(void);
++#endif
++/* End */
++
+ /* -------------------------------------------------------------------------- */
+ /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
+ 
+@@ -889,6 +914,16 @@ static int parse_gateway_configuration(const char * conf_file) {
+         MSG("INFO: Auto-quit after %u non-acknowledged PULL_DATA\n", autoquit_threshold);
+     }
+ 
++    /* Begin add for lora time sync */
++    #if defined(USE_LORA_TIME_SYNC)
++    val = json_object_get_value(conf_obj, "lora_timesync_freq_hz");
++    if (val != NULL) {
++        lora_timesync_freq_hz = (uint32_t)json_value_get_number(val);
++        MSG("INFO: lora timesync signal will be emitted at %u Hz\n", lora_timesync_freq_hz);
++    }
++    #endif
++    /* End */
++
+     /* free JSON parsing data structure */
+     json_value_free(root_val);
+     return 0;
+@@ -1032,6 +1067,12 @@ int main(void)
+     pthread_t thrid_valid;
+     pthread_t thrid_jit;
+     pthread_t thrid_timersync;
++    /* Begin add for lora time sync */
++    #if defined(USE_LORA_TIME_SYNC)
++    pthread_t thrid_lora_timesync;
++    pthread_t thrid_ntp_time;
++    #endif
++    /* End */
+ 
+     /* network socket creation */
+     struct addrinfo hints;
+@@ -1282,6 +1323,23 @@ int main(void)
+         exit(EXIT_FAILURE);
+     }
+ 
++    /* Begin add for lora time sync */
++    #if defined(USE_LORA_TIME_SYNC)
++    memset(&lora_timesync, 0x0, sizeof(lora_timesync));
++    i = pthread_create( &thrid_lora_timesync, NULL, (void * (*)(void *))thread_lora_timesync, NULL);
++    if (i != 0) {
++        MSG("ERROR: [main] impossible to create lora time sync thread\n");
++        exit(EXIT_FAILURE);
++    }
++
++    i = pthread_create( &thrid_ntp_time, NULL, (void * (*)(void *))thread_ntp_time, NULL);
++    if (i != 0) {
++        MSG("ERROR: [main] impossible to create ntp time thread\n");
++        exit(EXIT_FAILURE);
++    }
++    #endif
++    /* End */
++
+     /* spawn thread to manage GPS */
+     if (gps_enabled == true) {
+         i = pthread_create( &thrid_gps, NULL, (void * (*)(void *))thread_gps, NULL);
+@@ -1460,6 +1518,13 @@ int main(void)
+         }
+         printf("##### END #####\n");
+ 
++        /* Begin add for lora time sync */
++        #if defined(USE_LORA_TIME_SYNC)
++        MSG("[stat] gps_ref_valid:%d,utc_ref_valid:%d,lora_ref_valid:%d\n", gps_ref_valid, utc_ref_valid, lora_ref_valid);
++        MSG("[stat] gps.tv_sec: %ld, gps.tv_nsec: %ld\n", time_reference_gps.gps.tv_sec, time_reference_gps.gps.tv_nsec);
++        #endif
++        /* End */
++
+         /* generate a JSON report (will be sent to server by upstream thread) */
+         pthread_mutex_lock(&mx_stat_rep);
+         // Begin modify for add cpur/memr stat
+@@ -1490,6 +1555,12 @@ int main(void)
+     pthread_cancel(thrid_down); /* don't wait for downstream thread */
+     pthread_cancel(thrid_jit); /* don't wait for jit thread */
+     pthread_cancel(thrid_timersync); /* don't wait for timer sync thread */
++    /* Begin add for lora time sync */
++    #if defined(USE_LORA_TIME_SYNC)
++    pthread_cancel(thrid_lora_timesync);
++    pthread_cancel(thrid_ntp_time);
++    #endif
++    /* End */
+     if (gps_enabled == true) {
+         pthread_cancel(thrid_gps); /* don't wait for GPS thread */
+         pthread_cancel(thrid_valid); /* don't wait for validation thread */
+@@ -1556,7 +1627,7 @@ void thread_up(void) {
+     /* data buffers */
+     uint8_t buff_up[TX_BUFF_SIZE]; /* buffer to compose the upstream packet */
+     int buff_index;
+-    uint8_t buff_ack[32]; /* buffer to receive acknowledges */
++    // uint8_t buff_ack[32]; /* buffer to receive acknowledges */
+ 
+     /* protocol variables */
+     uint8_t token_h; /* random token for acknowledgement matching */
+@@ -1564,13 +1635,16 @@ void thread_up(void) {
+ 
+     /* ping measurement variables */
+     struct timespec send_time;
+-    struct timespec recv_time;
++    // struct timespec recv_time;
+ 
+     /* GPS synchronization variables */
+     struct timespec pkt_utc_time;
+     struct tm * x; /* broken-up UTC time */
+     struct timespec pkt_gps_time;
+     uint64_t pkt_gps_time_ms;
++    /* Begin add for lora time sync */
++    uint64_t pkt_gps_time_usec;
++    /* End */
+ 
+     /* report management variable */
+     bool send_report = false;
+@@ -1614,12 +1688,30 @@ void thread_up(void) {
+         }
+ 
+         /* get a copy of GPS time reference (avoid 1 mutex per packet) */
+-        if ((nb_pkt > 0) && (gps_enabled == true)) {
++        /* Begin add for lora time sync */
++        if ((nb_pkt > 0) && (gps_enabled == true) && (gps_ref_valid == true)) {
+             pthread_mutex_lock(&mx_timeref);
+             ref_ok = gps_ref_valid;
+             local_ref = time_reference_gps;
+             pthread_mutex_unlock(&mx_timeref);
+-        } else {
++        } 
++        #if defined(USE_LORA_TIME_SYNC)
++        else if ((nb_pkt > 0) && !gps_ref_valid && utc_ref_valid) {
++            pthread_mutex_lock(&mx_timeref);
++            ref_ok = utc_ref_valid;
++            local_ref = time_reference_gps;
++            pthread_mutex_unlock(&mx_timeref);
++        }
++        else if ((nb_pkt > 0) && !gps_ref_valid && !utc_ref_valid && lora_ref_valid) {
++            pthread_mutex_lock(&mx_timeref);
++            lora_timesync_set(&time_reference_gps, false);
++            ref_ok = lora_ref_valid;
++            local_ref = time_reference_gps;
++            pthread_mutex_unlock(&mx_timeref);
++        }
++        #endif
++        /* End */
++        else {
+             ref_ok = false;
+         }
+ 
+@@ -1716,6 +1808,10 @@ void thread_up(void) {
+                 exit(EXIT_FAILURE);
+             }
+ 
++            /* Begin add for lora time sync */
++            MSG("[up] gps_ref_valid:%d,utc_ref_valid:%d,lora_ref_valid:%d\n", gps_ref_valid, utc_ref_valid, lora_ref_valid);
++            /* End */
++
+             /* Packet RX time (GPS based), 37 useful chars */
+             if (ref_ok == true) {
+                 /* convert packet timestamp to UTC absolute time */
+@@ -1735,8 +1831,12 @@ void thread_up(void) {
+                 j = lgw_cnt2gps(local_ref, p->count_us, &pkt_gps_time);
+                 if (j == LGW_GPS_SUCCESS) {
+                     pkt_gps_time_ms = pkt_gps_time.tv_sec * 1E3 + pkt_gps_time.tv_nsec / 1E6;
+-                    j = snprintf((char *)(buff_up + buff_index), TX_BUFF_SIZE-buff_index, ",\"tmms\":%llu",
+-                                    pkt_gps_time_ms); /* GPS time in milliseconds since 06.Jan.1980 */
++                    /* Begin add for lora time sync */
++                    pkt_gps_time_usec = pkt_gps_time.tv_sec * 1E6 + pkt_gps_time.tv_nsec / 1E3;
++                    pkt_gps_time_usec = pkt_gps_time_usec - pkt_gps_time_ms * 1E3;
++                    j = snprintf((char *)(buff_up + buff_index), TX_BUFF_SIZE-buff_index, ",\"tmms\":%llu,\"usec\":%llu",
++                                    pkt_gps_time_ms, pkt_gps_time_usec); /* GPS time in milliseconds since 06.Jan.1980 */
++                    /* End */
+                     if (j > 0) {
+                         buff_index += j;
+                     } else {
+@@ -1961,7 +2061,7 @@ void thread_up(void) {
+         ++buff_index;
+         buff_up[buff_index] = 0; /* add string terminator, for safety */
+ 
+-        printf("\nJSON up: %s\n", (char *)(buff_up + 12)); /* DEBUG: display JSON payload */
++        MSG("\nJSON up: %s\n", (char *)(buff_up + 12)); /* DEBUG: display JSON payload */
+ 
+         /* send datagram to server */
+         send(sock_up, (void *)buff_up, buff_index, 0);
+@@ -2035,7 +2135,7 @@ void thread_down(void) {
+     uint64_t x2;
+     double x3, x4;
+     int buff_index;
+-    int j;
++    // int j;
+ 
+     /* variables to send on GPS timestamp */
+     struct tref local_ref; /* time reference used for GPS <-> timestamp conversion */
+@@ -2051,6 +2151,10 @@ void thread_down(void) {
+     time_t diff_beacon_time;
+     struct timespec next_beacon_gps_time; /* gps time of next beacon packet */
+     struct timespec last_beacon_gps_time; /* gps time of last enqueued beacon packet */
++    /* Begin add for lora time sync */
++    int next_beacon_time_type = 0;
++    int last_beacon_time_type = 0;
++    /* End */
+     int retry;
+ 
+     /* beacon data fields, byte 0 is Least Significant Byte */
+@@ -2225,7 +2329,35 @@ void thread_down(void) {
+             while (beacon_loop && (beacon_period != 0)) {
+                 pthread_mutex_lock(&mx_timeref);
+                 /* Wait for GPS to be ready before inserting beacons in JiT queue */
+-                if ((gps_ref_valid == true) && (xtal_correct_ok == true)) {
++
++                /* Begin add for lora time sync */
++                if (((gps_ref_valid == true) && (xtal_correct_ok == true)) || utc_ref_valid || lora_ref_valid) {
++
++                    MSG("[beacon] gps_ref_valid:%d,utc_ref_valid:%d,lora_ref_valid:%d\n", gps_ref_valid, utc_ref_valid, lora_ref_valid);
++                    #if defined(USE_LORA_TIME_SYNC)
++                    if (gps_ref_valid) {
++                        beacon_pkt.tx_mode = ON_GPS;
++                        next_beacon_time_type = 1;
++                    } else if (!gps_ref_valid && utc_ref_valid) {
++                        beacon_pkt.tx_mode = TIMESTAMPED;
++                        next_beacon_time_type = 2;
++                    } else if (!gps_ref_valid && !utc_ref_valid && lora_ref_valid) {
++                        lora_timesync_set(&time_reference_gps, false);
++                        beacon_pkt.tx_mode = TIMESTAMPED;
++                        next_beacon_time_type = 3;
++                    }
++
++                    if ((next_beacon_time_type != last_beacon_time_type)
++                        || (last_beacon_gps_time.tv_sec <= time_reference_gps.gps.tv_sec)
++                        || (last_beacon_gps_time.tv_sec > (time_reference_gps.gps.tv_sec + 8 * (time_t)beacon_period))) {
++                        if (last_beacon_gps_time.tv_sec != 0) {
++                            retry = 0;
++                        }
++                        last_beacon_gps_time.tv_sec = 0;
++                    }
++                    last_beacon_time_type = next_beacon_time_type;
++                    #endif
++                 /* End */
+ 
+                     /* compute GPS time for next beacon to come      */
+                     /*   LoRaWAN: T = k*beacon_period + TBeaconDelay */
+@@ -2247,12 +2379,17 @@ void thread_down(void) {
+                     {
+                     time_t time_unix;
+ 
++                    /* Begin add for lora time sync */
++                    time_unix = time_reference_gps.utc.tv_sec;
++                    MSG_DEBUG(DEBUG_BEACON, "GPS-utc : tv_sec: %ld,%s", time_unix, ctime(&time_unix));
+                     time_unix = time_reference_gps.gps.tv_sec + UNIX_GPS_EPOCH_OFFSET;
+-                    MSG_DEBUG(DEBUG_BEACON, "GPS-now : %s", ctime(&time_unix));
++                    MSG_DEBUG(DEBUG_BEACON, "GPS-now : tv_sec: %ld,%s", time_reference_gps.gps.tv_sec, ctime(&time_unix));
+                     time_unix = last_beacon_gps_time.tv_sec + UNIX_GPS_EPOCH_OFFSET;
+-                    MSG_DEBUG(DEBUG_BEACON, "GPS-last: %s", ctime(&time_unix));
++                    MSG_DEBUG(DEBUG_BEACON, "GPS-last: tv_sec: %ld,%s", last_beacon_gps_time.tv_sec, ctime(&time_unix));
+                     time_unix = next_beacon_gps_time.tv_sec + UNIX_GPS_EPOCH_OFFSET;
+-                    MSG_DEBUG(DEBUG_BEACON, "GPS-next: %s", ctime(&time_unix));
++                    MSG_DEBUG(DEBUG_BEACON, "GPS-next: tv_sec: %ld,%s", next_beacon_gps_time.tv_sec, ctime(&time_unix));
++                    /* End */
++
+                     }
+ #endif
+ 
+@@ -2401,6 +2538,16 @@ void thread_down(void) {
+             #endif
+             /* End */
+ 
++            /* Begin add for lora time sync */
++            #if defined(USE_LORA_TIME_SYNC)
++            i = lora_timesync_down(buff_down, msg_len);
++            if (1 == i) {
++                MSG("INFO: [down] the timesync down msg\n");
++                continue;
++            }
++            #endif
++            /* End */
++
+             /* if the datagram does not respect protocol, just ignore it */
+             //Begin add for adapt iot lora sdk
+             if ((msg_len < 4) || (buff_down[0] != PROTOCOL_VERSION) || ((buff_down[3] != PKT_PULL_RESP) && (buff_down[3] != PKT_PULL_ACK) && (buff_down[3] != PKT_PUSH_ACK))) {
+@@ -2444,7 +2591,7 @@ void thread_down(void) {
+             /* the datagram is a PULL_RESP */
+             buff_down[msg_len] = 0; /* add string terminator, just to be safe */
+             MSG("INFO: [down] PULL_RESP received  - token[%d:%d] :)\n", buff_down[1], buff_down[2]); /* very verbose */
+-            printf("\nJSON down: %s\n", (char *)(buff_down + 4)); /* DEBUG: display JSON payload */
++            MSG("\nJSON down: %s\n", (char *)(buff_down + 4)); /* DEBUG: display JSON payload */
+ 
+             /* initialize TX struct and try to parse JSON */
+             memset(&txpkt, 0, sizeof txpkt);
+@@ -2486,7 +2633,23 @@ void thread_down(void) {
+                         json_value_free(root_val);
+                         continue;
+                     }
+-                    if (gps_enabled == true) {
++
++                    /* Begin add for lora time sync */
++                    MSG("[down] gps_ref_valid:%d,utc_ref_valid:%d,lora_ref_valid:%d\n", gps_ref_valid, utc_ref_valid, lora_ref_valid);
++                    #if defined(USE_LORA_TIME_SYNC)
++                    if (!gps_ref_valid && utc_ref_valid) {
++                        pthread_mutex_lock(&mx_timeref);
++                        local_ref = time_reference_gps;
++                        pthread_mutex_unlock(&mx_timeref);
++                    } else if (!gps_ref_valid && !utc_ref_valid && lora_ref_valid) {
++                        pthread_mutex_lock(&mx_timeref);
++                        lora_timesync_set(&time_reference_gps, false);
++                        local_ref = time_reference_gps;
++                        pthread_mutex_unlock(&mx_timeref);
++                    }
++                    #endif
++                    /* End */
++                    else if (gps_enabled == true) {
+                         pthread_mutex_lock(&mx_timeref);
+                         if (gps_ref_valid == true) {
+                             local_ref = time_reference_gps;
+@@ -2862,7 +3025,8 @@ void thread_jit(void) {
+                         pthread_mutex_lock(&mx_meas_dw);
+                         meas_nb_tx_ok += 1;
+                         pthread_mutex_unlock(&mx_meas_dw);
+-                        MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done: count_us=%u\n", pkt.count_us);
++                        //MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done: count_us=%u\n", pkt.count_us);
++                        MSG("lgw_send done: count_us=%u\n", pkt.count_us);
+                     }
+                 } else {
+                     MSG("ERROR: jit_dequeue failed with %d\n", jit_result);
+@@ -2882,6 +3046,9 @@ void thread_jit(void) {
+ static void gps_process_sync(void) {
+     struct timespec gps_time;
+     struct timespec utc;
++    /* Begin add for lora time sync */
++    bool coord_ok = false;
++    /* End */
+     uint32_t trig_tstamp; /* concentrator timestamp associated with PPM pulse */
+     int i = lgw_gps_get(&utc, &gps_time, NULL, NULL);
+ 
+@@ -2900,13 +3067,27 @@ static void gps_process_sync(void) {
+         return;
+     }
+ 
++    /* Begin add for lora time sync */
++    pthread_mutex_lock(&mx_meas_gps);
++    coord_ok = gps_coord_valid;
++    pthread_mutex_unlock(&mx_meas_gps);
++    if (coord_ok == false) {
++        // MSG("WARNING: [gps] GPS coord invalid, no set time reference\n");
++        return;
++    }
++
+     /* try to update time reference with the new GPS time & timestamp */
+     pthread_mutex_lock(&mx_timeref);
+     i = lgw_gps_sync(&time_reference_gps, trig_tstamp, utc, gps_time);
+-    pthread_mutex_unlock(&mx_timeref);
+     if (i != LGW_GPS_SUCCESS) {
+         MSG("WARNING: [gps] GPS out of sync, keeping previous time reference\n");
++    } else {
++        gps_ref_valid = true;
++        utc_ref_valid = false;
++        lora_ref_valid = false;
+     }
++    pthread_mutex_unlock(&mx_timeref);
++    /* End */
+ }
+ 
+ static void gps_process_coords(void) {
+@@ -3032,7 +3213,7 @@ void thread_valid(void) {
+     /* GPS reference validation variables */
+     long gps_ref_age = 0;
+     bool ref_valid_local = false;
+-    double xtal_err_cpy;
++    double xtal_err_cpy = 1.0;
+ 
+     /* variables for XTAL correction averaging */
+     unsigned init_cpt = 0;
+@@ -3055,21 +3236,51 @@ void thread_valid(void) {
+     while (!exit_sig && !quit_sig) {
+         wait_ms(1000);
+ 
+-        /* calculate when the time reference was last updated */
++        /* Begin add for lora time sync */
++        #if defined(USE_LORA_TIME_SYNC)
+         pthread_mutex_lock(&mx_timeref);
+-        gps_ref_age = (long)difftime(time(NULL), time_reference_gps.systime);
+-        if ((gps_ref_age >= 0) && (gps_ref_age <= GPS_REF_MAX_AGE)) {
+-            /* time ref is ok, validate and  */
+-            gps_ref_valid = true;
+-            ref_valid_local = true;
+-            xtal_err_cpy = time_reference_gps.xtal_err;
+-            //printf("XTAL err: %.15lf (1/XTAL_err:%.15lf)\n", xtal_err_cpy, 1/xtal_err_cpy); // DEBUG
++        // MSG("[valid] gps_ref_valid:%d,utc_ref_valid:%d,lora_ref_valid:%d\n", gps_ref_valid, utc_ref_valid, lora_ref_valid);
++        if (gps_ref_valid) {
++            /* calculate when the time reference was last updated */
++            gps_ref_age = (long)difftime(time(NULL), time_reference_gps.systime);
++            if ((gps_ref_age >= 0) && (gps_ref_age <= GPS_REF_MAX_AGE)) {
++                /* time ref is ok, validate and  */
++                gps_ref_valid = true;
++                utc_ref_valid = false;
++                lora_ref_valid = false;
++                ref_valid_local = true;
++                xtal_err_cpy = time_reference_gps.xtal_err;
++                //printf("XTAL err: %.15lf (1/XTAL_err:%.15lf)\n", xtal_err_cpy, 1/xtal_err_cpy); // DEBUG
++            } else {
++                /* time ref is too old, invalidate */
++                gps_ref_valid = false;
++                utc_ref_valid = false;
++                lora_ref_valid = false;
++                ref_valid_local = false;
++            }
++        } else if (!gps_ref_valid && utc_ref_valid) {
++            gps_ref_age = (long)difftime(time(NULL), time_reference_gps.systime);
++            if ((gps_ref_age >= 0) && (gps_ref_age <= 30)) {
++                utc_ref_valid = true;
++                lora_ref_valid = false;
++            } else {
++                utc_ref_valid = false;
++            }        
++        } else if (!gps_ref_valid && !utc_ref_valid && lora_ref_valid) {
++            gps_ref_age = (long)difftime(time(NULL), time_reference_gps.systime);
++            if ((gps_ref_age >= 0) && (gps_ref_age <= TIME_SYNC_INTERVAL_MAX * 2)) {
++                lora_ref_valid = true;
++            } else {
++                lora_ref_valid = false;
++            }
+         } else {
+-            /* time ref is too old, invalidate */
+             gps_ref_valid = false;
+-            ref_valid_local = false;
++            utc_ref_valid = false;
++            lora_ref_valid = false;
+         }
+         pthread_mutex_unlock(&mx_timeref);
++        #endif
++        /* End */
+ 
+         /* manage XTAL correction */
+         if (ref_valid_local == false) {
+diff --git a/lora_pkt_fwd/src/lora_timesync.c b/lora_pkt_fwd/src/lora_timesync.c
+new file mode 100755
+index 0000000..135eab0
+--- /dev/null
++++ b/lora_pkt_fwd/src/lora_timesync.c
+@@ -0,0 +1,472 @@
++
++/* -------------------------------------------------------------------------- */
++/* --- DEPENDANCIES --------------------------------------------------------- */
++
++#define _GNU_SOURCE     /* needed for qsort_r to be defined */
++#include <stdlib.h>     /* qsort_r */
++#include <stdio.h>      /* printf, fprintf, snprintf, fopen, fputs */
++#include <string.h>     /* memset, memcpy */
++#include <netinet/in.h>     /* INET constants and stuff */
++#include <pthread.h>
++#include <assert.h>
++#include <math.h>
++
++#include "trace.h"
++#include "base64.h"
++#include "parson.h"
++#include "lora_timesync.h"
++#include "aes.h"
++#include "cmac.h"
++#include "loragw_aux.h"
++#include "loragw_hal.h"
++#include "loragw_reg.h"
++#include "timersync.h"
++#include "jitqueue.h"
++
++/* -------------------------------------------------------------------------- */
++/* --- PRIVATE MACROS ------------------------------------------------------- */
++#define STD_LORA_PREAMB 8
++
++#define UTC_GPS_EPOCH_OFFSET 315964800
++
++#define LEAP_SECONDS 18
++
++#define ADJUST_SECOND 2
++
++#define TMST_COUNT_MAX 4294967296
++
++
++/* -------------------------------------------------------------------------- */
++/* --- PRIVATE CONSTANTS & TYPES -------------------------------------------- */
++
++
++/* -------------------------------------------------------------------------- */
++/* --- PRIVATE VARIABLES (GLOBAL) ------------------------------------------- */
++/*!
++ * CMAC computation context variable
++ */
++static AES_CMAC_CTX AesCmacCtx[1];
++
++/*!
++ * Contains the computed MIC field.
++ *
++ * \remark Only the 4 first bytes are used
++ */
++static uint8_t Mic[16];
++
++struct lora_time_sync_s lora_timesync;
++pthread_mutex_t mx_timesync = PTHREAD_MUTEX_INITIALIZER;
++
++/* -------------------------------------------------------------------------- */
++/* --- PRIVATE SHARED VARIABLES (GLOBAL) ------------------------------------ */
++extern bool exit_sig;
++extern bool quit_sig;
++extern pthread_mutex_t mx_concent;
++extern struct jit_queue_s jit_queue;
++extern uint32_t net_mac_h;
++extern uint32_t net_mac_l;
++extern pthread_mutex_t mx_timeref;
++extern struct tref time_reference_gps;
++extern bool gps_ref_valid;
++extern bool lora_ref_valid;
++extern bool utc_ref_valid;
++extern uint32_t lora_timesync_freq_hz;
++extern uint8_t ntp_update;
++
++/* -------------------------------------------------------------------------- */
++/* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
++
++
++/* -------------------------------------------------------------------------- */
++/* --- PUBLIC FUNCTIONS DEFINITION ----------------------------------------- */
++
++#if defined(USE_LORA_TIME_SYNC)
++static void compute_mic(const uint8_t *buffer, uint16_t size, const uint8_t *key, uint32_t *mic) {
++    AES_CMAC_Init(AesCmacCtx);
++
++    AES_CMAC_SetKey(AesCmacCtx, key);
++
++    AES_CMAC_Update(AesCmacCtx, buffer, size & 0xFF);
++
++    AES_CMAC_Final(Mic, AesCmacCtx);
++
++    *mic = (uint32_t)((uint32_t)Mic[3] << 24 | (uint32_t)Mic[2] << 16 | (uint32_t)Mic[1] << 8 | (uint32_t)Mic[0]);
++    MSG("INFO: [lora_timesync] MIC: %02x %02x %02x %02x, mic: %08x\n", Mic[0], Mic[1], Mic[2], Mic[3], *mic);
++}
++
++int lora_timesync_set(struct tref *ref, bool need_update) {
++    int ret = 0;
++    uint32_t cur_tref;
++    uint32_t tref;
++    uint64_t tgps;
++    double x1, x2;
++    struct timespec gps_time;
++
++    if (ref == NULL) {
++        MSG("ERROR: [lora_timesync] ref is NULL\n");
++        return -1;
++    }
++
++    pthread_mutex_lock(&mx_concent);
++    lgw_reg_w(LGW_GPS_EN, 0);
++    ret = lgw_get_trigcnt(&cur_tref);
++    lgw_reg_w(LGW_GPS_EN, 1);
++    pthread_mutex_unlock(&mx_concent);
++    if (ret != LGW_HAL_SUCCESS) {
++        MSG("WARNING: [lora_timesync] failed to get concentrator timestamp\n");
++        return -1;
++    }
++
++    if (cur_tref > lora_timesync.last_tref) {
++        tref = cur_tref;
++        tgps = lora_timesync.last_tgps + ((uint64_t)cur_tref - (uint64_t)lora_timesync.last_tref);
++    } else {
++        tref = cur_tref;
++        tgps = lora_timesync.last_tgps + (uint64_t)(TMST_COUNT_MAX) + (uint64_t)cur_tref - (uint64_t)lora_timesync.last_tref;
++    }
++    MSG("INFO: [lora_timesync] now tref: %u\n", tref);
++    MSG("INFO: [lora_timesync] now tgps: %llu\n", tgps);
++
++    if (need_update) {
++        pthread_mutex_lock(&mx_timesync);
++        lora_timesync.last_tref = tref;
++        lora_timesync.last_tgps = tgps;
++        MSG("INFO: [lora_timesync] last_tref: %u\n", lora_timesync.last_tref);
++        MSG("INFO: [lora_timesync] last_tgps: %llu\n", lora_timesync.last_tgps);
++        pthread_mutex_unlock(&mx_timesync);
++
++        ref->systime = time(NULL);
++        lora_ref_valid = true;
++    }
++
++    x1 = modf((double)tgps / 1E6, &x2);
++    gps_time.tv_sec = (time_t)x2;
++    gps_time.tv_nsec = (long)(x1 * 1E9);
++
++    clock_gettime(CLOCK_REALTIME, &ref->utc);
++    ref->count_us = cur_tref;
++    ref->gps.tv_sec = gps_time.tv_sec;
++    ref->gps.tv_nsec = gps_time.tv_nsec;
++    ref->xtal_err = 1;
++    MSG("INFO: [lora_timesync] gps.tv_sec: %ld, gps.tv_nsec: %ld\n", ref->gps.tv_sec, ref->gps.tv_nsec);
++
++    return 0;
++}
++
++int lora_timesync_check(uint64_t tgps_val) {
++    struct timespec cur_utc;
++    uint64_t cur_gps_val = 0;
++    uint64_t diff = 0;
++    int valid = 0;
++
++    if (ntp_update == 1) {
++        clock_gettime(CLOCK_REALTIME, &cur_utc);
++        cur_gps_val = ((uint64_t)(cur_utc.tv_sec - UTC_GPS_EPOCH_OFFSET + LEAP_SECONDS)) * 1E6 + ((uint64_t)cur_utc.tv_nsec) / 1E3;
++        MSG("INFO: [lora_timesync] cur_gps_val: %llu\n", cur_gps_val);
++        if (cur_gps_val > tgps_val) {
++            diff = cur_gps_val - tgps_val;
++        } else {
++            diff = tgps_val - cur_gps_val;
++        }
++    } else if (lora_timesync.last_tgps > 0) {
++        if (tgps_val > lora_timesync.last_tgps) {
++            diff = tgps_val - lora_timesync.last_tgps;
++        } else {
++            diff = lora_timesync.last_tgps - tgps_val;
++        }
++    }
++
++    if (diff <= TIME_SYNC_INTERVAL_MAX * 2 * 1E6) {
++        valid = 1;
++    }
++
++    MSG("INFO: [lora_timesync] valid: %d\n", valid);
++    return valid;
++}
++
++int lora_timesync_down(const uint8_t *msg_buf, uint16_t msg_len) {
++    JSON_Object *txpk_obj = NULL;
++    JSON_Object *tadj_obj = NULL;
++    JSON_Object *bsgw_obj = NULL;
++    JSON_Value *root_val = NULL;
++    JSON_Value *val = NULL;
++    const char *str;
++    uint8_t msg_id = 0;
++    uint64_t tgps_val = 0;
++    uint32_t tref_val = 0;
++    uint16_t interval = 0;
++    int enable = 0;
++    int selected = 0;
++    int valid = 0;
++
++    if (msg_len < 4) {
++        MSG("WARNING: [lora_timesync] ignoring invalid packet, len: %d\n", msg_len);
++        return -1;
++    }
++
++    msg_id = msg_buf[3];
++    if (msg_id == LORA_TIME_SYNC_DOWN) {
++        MSG("INFO: [lora_timesync] down msg: %s\n", (msg_buf + 4));
++        root_val = json_parse_string_with_comments((const char *)(msg_buf + 4));
++        if (root_val == NULL) {
++            MSG("WARNING: [lora_timesync] invalid JSON\n");
++            return -1;
++        }
++
++        txpk_obj = json_object_get_object(json_value_get_object(root_val), "txpk");
++        if (NULL != txpk_obj) {
++            enable = json_object_get_boolean(txpk_obj, "sync");
++            MSG("INFO: [lora_timesync] enable: %d\n", enable);
++            if (enable == 1) {
++                pthread_mutex_lock(&mx_timesync);
++                lora_timesync.enable = 1;
++
++                val = json_object_get_value(txpk_obj, "syncinterval");
++                if (val != NULL) {
++                    if (json_value_get_type(val) == JSONNumber) {
++                        interval = (uint16_t)json_value_get_number(val);
++                        if ((interval == 0) || (interval > TIME_SYNC_INTERVAL_MAX)) {
++                            interval = TIME_SYNC_INTERVAL_DEFAULT;
++                        }
++                        lora_timesync.interval = interval;
++                    } else {
++                        lora_timesync.interval = TIME_SYNC_INTERVAL_DEFAULT;
++                    }
++                }
++
++                val = json_object_get_value(txpk_obj, "synctimes");
++                if (val != NULL) {
++                    if (json_value_get_type(val) == JSONNumber) {
++                        lora_timesync.times = (uint16_t)json_value_get_number(val);
++                    } else {
++                        lora_timesync.times = 0;
++                    }
++                }
++
++                val = json_object_get_value(txpk_obj, "synctoken");
++                if (val != NULL) {
++                    if (json_value_get_type(val) == JSONNumber) {
++                        lora_timesync.token = (uint8_t)json_value_get_number(val);
++                    } else {
++                        lora_timesync.token = 0;
++                    }
++                }
++
++                str = json_object_get_string(txpk_obj, "synckey");
++                if (str != NULL) {
++                    MSG("INFO: [lora_timesync] synckey:%s\n", str);
++                    if (b64_to_bin(str, strlen(str), lora_timesync.key, sizeof(lora_timesync.key)) > 0) {
++                        lora_timesync.use_key = 1;
++                    }
++                }
++
++                lora_timesync.count = 0;
++                lora_timesync.rf_chain = 0;
++                lora_timesync.rf_power = 17;
++                lora_timesync.freq_hz = lora_timesync_freq_hz;
++                lora_timesync.net_mac_h = net_mac_h;
++                lora_timesync.net_mac_l = net_mac_l;
++                pthread_mutex_unlock(&mx_timesync);
++            } else if (enable == 0) {
++                pthread_mutex_lock(&mx_timesync);
++                lora_timesync.enable = 0;
++                pthread_mutex_unlock(&mx_timesync);
++            }
++        }
++
++        tadj_obj = json_object_get_object(json_value_get_object(root_val), "set");
++        if (NULL != tadj_obj) {
++            tadj_obj = json_object_get_object(tadj_obj, "tadj");
++            if (NULL != tadj_obj) {
++                val = json_object_get_value(tadj_obj, "tgps");
++                if (val != NULL) {
++                    tgps_val = (uint64_t)json_value_get_number(val);
++                    if (tgps_val > 0) {
++                        valid = lora_timesync_check(tgps_val);
++                        val = json_object_get_value(tadj_obj, "tref");
++                        if ((val != NULL) && (valid == 1)) {
++                            tref_val = (uint32_t)json_value_get_number(val);
++                            if (tref_val > 0) {
++                                pthread_mutex_lock(&mx_timesync);
++                                lora_timesync.last_tgps = tgps_val;
++                                MSG("INFO: [lora_timesync] down tgps: %llu\n", lora_timesync.last_tgps);
++
++                                lora_timesync.last_tref = tref_val;
++                                MSG("INFO: [lora_timesync] down tref: %u\n", lora_timesync.last_tref);
++                                pthread_mutex_unlock(&mx_timesync);
++                            }
++                        }  
++                    }
++                }
++
++                pthread_mutex_lock(&mx_timeref);
++                if (!gps_ref_valid && !utc_ref_valid) {
++                    lora_timesync_set(&time_reference_gps, true);
++                }
++                pthread_mutex_unlock(&mx_timeref);
++            }
++        }
++
++        bsgw_obj = json_object_get_object(json_value_get_object(root_val), "set");
++        if (NULL != bsgw_obj) {
++            selected = json_object_get_boolean(bsgw_obj, "bsgw");
++            pthread_mutex_lock(&mx_timesync);
++            if (selected == 1) {
++                lora_timesync.bsgw_selected = 1;
++            } else if (selected == 0) {
++                lora_timesync.bsgw_selected = 0;
++            }
++            pthread_mutex_unlock(&mx_timesync);
++        }
++
++        json_value_free(root_val);
++
++        return 1;
++    }
++
++    return 0;
++}
++
++void thread_lora_timesync(void) {
++    struct timeval cur_unix;
++    struct timeval cur_tmst;
++    enum jit_error_e jit_result = JIT_ERROR_OK;
++    enum jit_pkt_type_e pkt_type = JIT_PKT_TYPE_DOWNLINK_CLASS_A;
++    struct lgw_pkt_tx_s pkt;
++    uint32_t sx1301_count_us;
++    int ret = 0;
++    uint8_t data[256];
++    uint32_t toa_us;
++    uint32_t mic = 0;
++    uint32_t count = 0;
++
++    while (!exit_sig && !quit_sig) {
++        wait_ms(1000);
++        count++;
++
++        if ((lora_timesync.enable == 1) && !gps_ref_valid && !utc_ref_valid) {
++            if ((lora_timesync.times > 0) && (lora_timesync.count >= lora_timesync.times)) {
++                continue;
++            }
++
++            if (lora_timesync.interval == 0) {
++                pthread_mutex_lock(&mx_timesync);
++                lora_timesync.interval = TIME_SYNC_INTERVAL_DEFAULT;
++                pthread_mutex_unlock(&mx_timesync);
++            }
++
++            if ((lora_timesync.count > 0) && (count < lora_timesync.interval)) {
++                continue;
++            }
++
++            memset(&pkt, 0x0, sizeof(pkt));
++
++            pkt.bandwidth = BW_125KHZ;
++            pkt.coderate = CR_LORA_4_5;
++            pkt.modulation = MOD_LORA;
++            pkt.datarate = DR_LORA_SF9;
++            pkt.preamble = STD_LORA_PREAMB;
++            pkt.tx_mode = TIMESTAMPED;
++            pkt.invert_pol = false;
++            pkt.no_crc = false;
++            pkt.rf_chain = lora_timesync.rf_chain;
++            pkt.rf_power = lora_timesync.rf_power;
++            pkt.freq_hz = lora_timesync.freq_hz;
++            MSG("INFO: [lora_timesync] pkt rf_chain: %d, rf_power: %d, freq_hz: %u\n", pkt.rf_chain, pkt.rf_power, pkt.freq_hz);
++
++            pthread_mutex_lock(&mx_concent);
++            lgw_reg_w(LGW_GPS_EN, 0);
++            ret = lgw_get_trigcnt(&sx1301_count_us);
++            lgw_reg_w(LGW_GPS_EN, 1);
++            pthread_mutex_unlock(&mx_concent);
++            if (ret != LGW_HAL_SUCCESS) {
++                MSG("INFO: [lora_timesync] failed to read concentrator timestamp\n");
++                continue;
++            }
++            pkt.count_us = sx1301_count_us + 1000000;
++
++            memset(&data, 0x0, sizeof(data));
++            data[0] = 0b11100100;                                 //MHDR: 1 octets
++            data[1] = 0xFF & (lora_timesync.net_mac_l >> 24);     //Gateway A EUI: 8 octets
++            data[2] = 0xFF & (lora_timesync.net_mac_l >> 16);     //Gateway A EUI
++            data[3] = 0xFF & (lora_timesync.net_mac_l >> 8);      //Gateway A EUI
++            data[4] = 0xFF & (lora_timesync.net_mac_l);           //Gateway A EUI
++            data[5] = 0xFF & (lora_timesync.net_mac_h >> 24);     //Gateway A EUI
++            data[6] = 0xFF & (lora_timesync.net_mac_h >> 16);     //Gateway A EUI
++            data[7] = 0xFF & (lora_timesync.net_mac_h >> 8);      //Gateway A EUI
++            data[8] = 0xFF & (lora_timesync.net_mac_h);           //Gateway A EUI
++            data[9]  = 0xFF & (pkt.count_us);                     //Gateway A tmst: 4 octets
++            data[10] = 0xFF & (pkt.count_us >> 8);                //Gateway A tmst
++            data[11] = 0xFF & (pkt.count_us >> 16);               //Gateway A tmst
++            data[12] = 0xFF & (pkt.count_us >> 24);               //Gateway A tmst
++            data[13] = 0;                                         //stat: 2 octets
++            data[14] = 0;                                         //stat
++            data[15] = lora_timesync.token & 0xFF;                //synctoken
++            data[16] = lora_timesync.count % 256;                 //token
++
++            if (1 == lora_timesync.use_key) {
++                compute_mic(data, 17, lora_timesync.key, &mic);
++                data[17] = mic & 0xFF;                            //MIC: 2 octets
++                data[18] = (mic >> 8) & 0xFF;                     //MIC
++            } else {
++                data[17] = 0;                                     //MIC: 2 octets
++                data[18] = 0;                                     //MIC
++            }
++
++            pkt.size = 19;
++            printf("[lora_timesync] data: 0x");
++            for (int i = 0; i < pkt.size; i++) {
++                printf("%02x", data[i]);
++            }
++            printf("\n");
++
++            memcpy(pkt.payload, data, pkt.size);
++            MSG("INFO: [lora_timesync] pkt count_us: %u, size: %d\n", pkt.count_us, pkt.size);
++
++            toa_us = lgw_time_on_air(&pkt) * 1000UL;
++            MSG("INFO: [lora_timesync] pkt TOA us: %u\n", toa_us);
++
++            pkt_type = JIT_PKT_TYPE_DOWNLINK_CLASS_A;
++            gettimeofday(&cur_unix, NULL);
++            get_concentrator_time(&cur_tmst, cur_unix);
++            jit_result = jit_enqueue(&jit_queue, &cur_tmst, &pkt, pkt_type);
++            if (jit_result != JIT_ERROR_OK) {
++                MSG("ERROR: [lora_timesync] Packet REJECTED (jit error=%d)\n", jit_result);
++            } else {
++                pthread_mutex_lock(&mx_timesync);
++                lora_timesync.count++;
++                pthread_mutex_unlock(&mx_timesync);
++                count = 0;
++            }
++
++            MSG("INFO: [lora_timesync] count: %d, interval: %d\n", lora_timesync.count, lora_timesync.interval);
++        }
++
++        if ((lora_timesync.bsgw_selected == 1) && (ntp_update == 1) && !gps_ref_valid) {
++            pthread_mutex_lock(&mx_concent);
++            lgw_reg_w(LGW_GPS_EN, 0);
++            ret = lgw_get_trigcnt(&sx1301_count_us);
++            lgw_reg_w(LGW_GPS_EN, 1);
++            pthread_mutex_unlock(&mx_concent);
++            if (ret != LGW_HAL_SUCCESS) {
++                MSG("WARNING: [lora_timesync] failed to get concentrator timestamp\n");
++                continue;
++            }
++
++            pthread_mutex_lock(&mx_timeref);          
++            clock_gettime(CLOCK_REALTIME, &time_reference_gps.utc);
++            time_reference_gps.systime = time(NULL);
++            time_reference_gps.count_us = sx1301_count_us;
++            time_reference_gps.gps.tv_sec = time_reference_gps.utc.tv_sec - UTC_GPS_EPOCH_OFFSET + LEAP_SECONDS - ADJUST_SECOND;
++            time_reference_gps.gps.tv_nsec = time_reference_gps.utc.tv_nsec;
++            time_reference_gps.xtal_err = 1;
++            utc_ref_valid = true;
++            lora_ref_valid = false;
++            // MSG("INFO: [lora_timesync] gps.tv_sec: %ld, gps.tv_nsec: %ld\n", time_reference_gps.gps.tv_sec, time_reference_gps.gps.tv_nsec);
++            pthread_mutex_unlock(&mx_timeref);
++        }
++
++    }
++}
++#endif
++
+diff --git a/lora_pkt_fwd/src/ntp_time.c b/lora_pkt_fwd/src/ntp_time.c
+new file mode 100755
+index 0000000..938ebc6
+--- /dev/null
++++ b/lora_pkt_fwd/src/ntp_time.c
+@@ -0,0 +1,438 @@
++/*
++ * Copyright (c) 2014-2016 Alibaba Group. All rights reserved.
++ * License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License"); you may
++ * not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ */
++
++/* fix an issue between POSIX and C99 */
++#if __STDC_VERSION__ >= 199901L
++    #define _XOPEN_SOURCE 600
++#else
++    #define _XOPEN_SOURCE 500
++#endif
++
++#include <stdint.h>         /* C99 types */
++#include <stdbool.h>        /* bool type */
++#include <stdio.h>          /* printf, fprintf, snprintf, fopen, fputs */
++#include <string.h>         /* memset */
++#include <signal.h>         /* sigaction */
++#include <time.h>           /* time, clock_gettime, strftime, gmtime */
++#include <sys/time.h>       /* timeval */
++#include <unistd.h>         /* getopt, access */
++#include <stdlib.h>         /* atoi, exit */
++#include <errno.h>          /* error messages */
++#include <math.h>           /* modf */
++#include <assert.h>
++#include <sys/socket.h>     /* socket specific definitions */
++#include <netinet/in.h>     /* INET constants and stuff */
++#include <arpa/inet.h>      /* IP address conversion stuff */
++#include <netdb.h>          /* gai_strerror */
++
++#include <pthread.h>
++
++#include "trace.h"
++#include "loragw_aux.h"
++
++#define HTTP_RESP_CONTENT_LEN   (64)
++#define ALIYUN_NTP_SERVER       "ntp%d.aliyun.com"
++#define ALIYUN_NTP_PORT         (123)
++
++#define LI                      0
++#define VN                      3
++#define MODE                    3
++#define STRATUM                 0
++#define POLL                    4
++#define PREC                   -6
++
++#define JAN_1970                0x83aa7e80 /* 2208988800 1970 - 1900 in seconds */
++
++/* How to multiply by 4294.967296 quickly (and not quite exactly)
++ * without using floating point or greater than 32-bit integers.
++ * If you want to fix the last 12 microseconds of error, add in
++ * (2911*(x))>>28)
++ */
++#define NTPFRAC(x)              (4294 * (x) + ((1981 * (x)) >> 11))
++
++/* The reverse of the above, needed if we want to set our microsecond
++ * clock (via settimeofday) based on the incoming time in NTP format.
++ * Basically exact.
++ */
++#define USEC(x)                 (((x) >> 12) - 759 * ((((x) >> 10) + 32768) >> 16))
++
++/* Converts NTP delay and dispersion, apparently in seconds scaled
++ * by 65536, to microseconds.  RFC1305 states this time is in seconds,
++ * doesn't mention the scaling.
++ * Should somehow be the same as 1000000 * x / 65536
++ */
++#define sec2u(x)                ((x) * 15.2587890625)
++
++struct timeval_t {
++    uint32_t tv_sec;
++    uint32_t tv_usec;
++};
++
++struct ntptime_t {
++    uint32_t coarse;
++    uint32_t fine;
++};
++
++struct ntp_packet_t {
++    int li;
++    int vn;
++    int mode;
++    int stratum;
++    int poll;
++    int prec;
++    int delay;
++    int disp;
++    int refid;
++};
++
++/**
++ * implement of htonl and ntohl
++ */
++#define BigLittleSwap(A)        ((((uint32_t)(A) & 0xff000000) >> 24) | \
++                                (((uint32_t)(A) & 0x00ff0000) >> 8) | \
++                                (((uint32_t)(A) & 0x0000ff00) << 8) | \
++                                (((uint32_t)(A) & 0x000000ff) << 24))
++
++/* return 1 if big endian */
++static int _check_endian(void)
++{
++    union {
++        uint32_t i;
++        uint8_t c[4];
++    } u;
++
++    u.i = 0x12345678;
++    return (0x12 == u.c[0]);
++}
++
++static uint32_t _htonl(uint32_t h)
++{
++    return _check_endian() ? h : BigLittleSwap(h);
++}
++
++static uint32_t _ntohl(uint32_t n)
++{
++    return _check_endian() ? n : BigLittleSwap(n);
++}
++
++static int _get_packet(unsigned char *packet, int *len)
++{
++    uint32_t data[12];
++    struct timeval_t now = {0, 0};
++
++    if (*len < 48) {
++        MSG("ERROR: packet buf too short!\n");
++        return -1;
++    }
++
++    memset(packet, 0, *len);
++
++    data[0] = _htonl((LI << 30) | (VN << 27) | (MODE << 24) |
++                     (STRATUM << 16) | (POLL << 8) | (PREC & 0xff));
++    data[1] = _htonl(1 << 16);  /* Root Delay (seconds) */
++    data[2] = _htonl(1 << 16);  /* Root Dispersion (seconds) */
++    data[10] = _htonl(now.tv_sec + JAN_1970); /* Transmit Timestamp coarse */
++    data[11] = _htonl(NTPFRAC(now.tv_usec));  /* Transmit Timestamp fine */
++
++    memcpy(packet, data, 48);
++    *len = 48;
++
++    return 0;
++}
++
++static void _rfc1305_parse_timeval(unsigned char *read_buf, struct timeval_t *tv)
++{
++/* straight out of RFC-1305 Appendix A */
++    struct ntp_packet_t ntp_packet;
++    struct ntptime_t xmttime;
++#ifdef NTP_DEBUG
++    struct ntptime_t reftime, orgtime, rectime;
++#endif
++    memset(&ntp_packet, 0, sizeof(struct ntp_packet_t));
++
++#define Data(i) _ntohl(((unsigned int *)read_buf)[i])
++    ntp_packet.li      = Data(0) >> 30 & 0x03;
++    ntp_packet.vn      = Data(0) >> 27 & 0x07;
++    ntp_packet.mode    = Data(0) >> 24 & 0x07;
++    ntp_packet.stratum = Data(0) >> 16 & 0xff;
++    ntp_packet.poll    = Data(0) >>  8 & 0xff;
++    ntp_packet.prec    = Data(0)       & 0xff;
++    if (ntp_packet.prec & 0x80) ntp_packet.prec |= 0xffffff00;
++    ntp_packet.delay   = Data(1);
++    ntp_packet.disp    = Data(2);
++    ntp_packet.refid   = Data(3);
++
++#ifdef NTP_DEBUG
++    reftime.coarse = Data(4);
++    reftime.fine   = Data(5);
++    orgtime.coarse = Data(6);
++    orgtime.fine   = Data(7);
++    rectime.coarse = Data(8);
++    rectime.fine   = Data(9);
++#endif
++    xmttime.coarse = Data(10);
++    xmttime.fine   = Data(11);
++#undef Data
++
++#ifdef NTP_DEBUG
++    MSG("INFO: LI=%d  VN=%d  Mode=%d  Stratum=%d  Poll=%d  Precision=%d\n",
++              ntp_packet.li, ntp_packet.vn, ntp_packet.mode,
++              ntp_packet.stratum, ntp_packet.poll, ntp_packet.prec);
++    MSG("INFO: Delay=%.1f  Dispersion=%.1f  Refid=%u.%u.%u.%u\n",
++              sec2u(ntp_packet.delay), sec2u(ntp_packet.disp),
++              ntp_packet.refid >> 24 & 0xff, ntp_packet.refid >> 16 & 0xff,
++              ntp_packet.refid >> 8 & 0xff, ntp_packet.refid & 0xff);
++    MSG("INFO: Reference %u.%.6u\n", reftime.coarse - JAN_1970, USEC(reftime.fine));
++    MSG("INFO: Originate %u.%.6u\n", orgtime.coarse - JAN_1970, USEC(orgtime.fine));
++    MSG("INFO: Receive   %u.%.6u\n", rectime.coarse - JAN_1970, USEC(rectime.fine));
++    MSG("INFO: Transmit  %u.%.6u\n", xmttime.coarse - JAN_1970, USEC(xmttime.fine));
++#endif
++
++    tv->tv_sec = xmttime.coarse - JAN_1970;
++    tv->tv_usec = USEC(xmttime.fine);
++}
++
++static void *_udp_create(char *host, unsigned short port)
++{
++#define NETWORK_ADDR_LEN    (16)
++
++    int                     rc = -1;
++    long                    socket_id = -1;
++    char                    port_ptr[6] = {0};
++    char                    addr[NETWORK_ADDR_LEN] = {0};
++    struct addrinfo         hints;
++    struct addrinfo        *res, *ainfo;
++    struct sockaddr_in     *sa = NULL;
++
++    if (NULL == host) {
++        return (void *)(-1);
++    }
++
++    sprintf(port_ptr, "%u", port);
++    memset((char *)&hints, 0x00, sizeof(hints));
++    hints.ai_socktype = SOCK_DGRAM;
++    hints.ai_family = AF_INET;
++    hints.ai_protocol = IPPROTO_UDP;
++
++    rc = getaddrinfo(host, port_ptr, &hints, &res);
++    if (0 != rc) {
++        perror("getaddrinfo error");
++        return (void *)(-1);
++    }
++
++    for (ainfo = res; ainfo != NULL; ainfo = ainfo->ai_next) {
++        if (AF_INET == ainfo->ai_family) {
++            sa = (struct sockaddr_in *)ainfo->ai_addr;
++            inet_ntop(AF_INET, &sa->sin_addr, addr, NETWORK_ADDR_LEN);
++            fprintf(stderr, "The host IP %s, port is %d\r\n", addr, ntohs(sa->sin_port));
++
++            socket_id = socket(ainfo->ai_family, ainfo->ai_socktype, ainfo->ai_protocol);
++            if (socket_id < 0) {
++                perror("create socket error");
++                continue;
++            }
++            if (0 == connect(socket_id, ainfo->ai_addr, ainfo->ai_addrlen)) {
++                break;
++            }
++
++            close(socket_id);
++        }
++    }
++    freeaddrinfo(res);
++
++    return (void *)socket_id;
++
++#undef NETWORK_ADDR_LEN
++}
++
++static void _udp_close(void *p_socket)
++{
++    long            socket_id = -1;
++
++    socket_id = (long)p_socket;
++    close(socket_id);
++}
++
++static int _udp_write(void *p_socket,
++                  const unsigned char *p_data,
++                  unsigned int datalen)
++{
++    int             rc = -1;
++    long            socket_id = -1;
++
++    socket_id = (long)p_socket;
++    rc = send(socket_id, (char *)p_data, (int)datalen, 0);
++    if (-1 == rc) {
++        return -1;
++    }
++
++    return rc;
++}
++
++int _udp_read(void *p_socket,
++                 unsigned char *p_data,
++                 unsigned int datalen)
++{
++    long            socket_id = -1;
++    int             count = -1;
++
++    if (NULL == p_data || NULL == p_socket) {
++        return -1;
++    }
++
++    socket_id = (long)p_socket;
++    count = (int)read(socket_id, p_data, datalen);
++
++    return count;
++}
++
++int _udp_read_timeout(void *p_socket,
++                        unsigned char *p_data,
++                        unsigned int datalen,
++                        unsigned int timeout)
++{
++    int                 ret;
++    struct timeval      tv;
++    fd_set              read_fds;
++    long                socket_id = -1;
++
++    if (NULL == p_socket || NULL == p_data) {
++        return -1;
++    }
++    socket_id = (long)p_socket;
++
++    if (socket_id < 0) {
++        return -1;
++    }
++
++    FD_ZERO(&read_fds);
++    FD_SET(socket_id, &read_fds);
++
++    tv.tv_sec  = timeout / 1000;
++    tv.tv_usec = (timeout % 1000) * 1000;
++
++    ret = select(socket_id + 1, &read_fds, NULL, NULL, timeout == 0 ? NULL : &tv);
++
++    /* Zero fds ready means we timed out */
++    if (ret == 0) {
++        return -2;    /* receive timeout */
++    }
++
++    if (ret < 0) {
++        if (errno == EINTR) {
++            return -3;    /* want read */
++        }
++
++        return -4; /* receive failed */
++    }
++
++    /* This call will not block */
++    return _udp_read(p_socket, p_data, datalen);
++}
++
++static uint64_t _get_timestamp_from_ntp(const char *host)
++{
++    long fd;  /* socket */
++    int ret = -1;
++    uint64_t retval = 0;
++    struct timeval_t tv;
++    unsigned char write_buf[48] = {0};
++    int write_len = sizeof(write_buf);
++    unsigned char read_buf[1500] = {0};
++
++    fd = (long)_udp_create((char *)host, ALIYUN_NTP_PORT);
++    if (fd < 0) {
++        MSG("ERROR: udp create error!");
++        return 0;
++    }
++
++    ret = _get_packet(write_buf, &write_len);
++    if (ret < 0) {
++        MSG("ERROR: get_packet error!");
++        goto do_exit;
++    }
++
++    ret = _udp_write((void *)fd, write_buf, write_len);
++    if (ret < 0) {
++        MSG("ERROR: udp write error!");
++        goto do_exit;
++    }
++
++    ret = _udp_read_timeout((void *)fd, read_buf, sizeof(read_buf), 3000);
++    if (ret < 0) {
++        MSG("ERROR: udp read error!");
++        goto do_exit;
++    }
++    _rfc1305_parse_timeval(read_buf, &tv);
++    retval = ((uint64_t)tv.tv_sec) * 1000 + tv.tv_usec / 1000;
++
++do_exit:
++    _udp_close((void *)fd);
++    return retval;
++}
++
++uint64_t get_utc_time_from_ntp(void)
++{
++    char ntp_server[20] = {0};
++    int ntp_server_index = 1;
++    uint64_t time_in_ms = 0;
++
++    for (ntp_server_index = 1; ntp_server_index <= 7; ntp_server_index ++) {
++        snprintf(ntp_server, 20, ALIYUN_NTP_SERVER, ntp_server_index);
++        time_in_ms = _get_timestamp_from_ntp(ntp_server);
++        if (time_in_ms > 0) {
++            break;
++        }
++    }
++
++    return time_in_ms;
++}
++
++extern bool exit_sig;
++extern bool quit_sig;
++
++uint8_t ntp_update = 0;
++
++void thread_ntp_time(void) {
++    uint32_t count = 0;
++    uint64_t utc_time_ms = 0;
++    struct timeval curtime;
++    double x1, x2;
++
++    ntp_update = 0;
++    while (!exit_sig && !quit_sig) {
++        if ((utc_time_ms == 0) || (count >= 60)) {
++            utc_time_ms = get_utc_time_from_ntp();
++            if (utc_time_ms > 0) {
++                x1 = modf((double)utc_time_ms/1E3, &x2);
++                curtime.tv_sec = (time_t)x2;
++                curtime.tv_usec = (long)(x1 * 1E6);
++                settimeofday(&curtime, NULL);
++                MSG("INFO: utc_time_ms: %llu\n", utc_time_ms);
++                MSG("INFO: curtime.tv_sec: %ld, curtime.tv_usec: %ld\n", curtime.tv_sec, curtime.tv_usec);
++
++                ntp_update = 1;
++            }
++            count = 0;
++        }
++
++        wait_ms(60000);
++        count++;
++    }
++}
++
+-- 
+1.8.3.1
+

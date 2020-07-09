@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=iot.gateway.watchdog
+Exec=CONFIG_MBUS_SERVICE_BIN_DIR/watch_dog
+

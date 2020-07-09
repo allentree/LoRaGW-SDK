@@ -1,0 +1,13 @@
+#!/bin/bash
+unset mbusd_socket_dir
+unset CONFIG_MBUS_TMP_PATH
+#must be the same with the watchdog include file's setting
+unset CONFIG_MBUS_UNIX_PATH
+unset CONFIG_MBUS_PID_FILE
+#set the user's bin directory
+unset CONFIG_MBUS_SERVICE_BIN_DIR
+unset CONFIG_MBUS_SERVICE_DIR
+unset OUTPUT_DIR
+unset DBUS_SERVICE_ENABLE
+unset service_dir
+unset bindir

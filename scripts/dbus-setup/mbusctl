@@ -1,0 +1,3 @@
+#! /bin/bash
+
+busctl --address=unix:path=CONFIG_MBUS_UNIX_PATH $*

@@ -1,0 +1,101 @@
+diff --git a/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c b/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c
+index f120205..1664733 100755
+--- a/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -149,6 +149,10 @@ Maintainer: Michael Coracin
+ #endif
+ /* End */
+ 
++/* Begin modify for sx1301 coutner wrap-up */
++#define TMST_COUNT_MAX 4294967296
++/* End */
++
+ /* -------------------------------------------------------------------------- */
+ /* --- PRIVATE VARIABLES (GLOBAL) ------------------------------------------- */
+ 
+@@ -1008,7 +1012,16 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error)
+         memcpy((void *)(buff_ack + buff_index), (void *)"\"error\":", 8);
+         buff_index += 8;
+         switch (error) {
++            /* Begin add for separate report FULL txpk ack */
+             case JIT_ERROR_FULL:
++                memcpy((void *)(buff_ack + buff_index), (void *)"\"FULL\"", 6);
++                buff_index += 6;
++                /* update stats */
++                pthread_mutex_lock(&mx_meas_dw);
++                meas_nb_tx_rejected_collision_packet += 1;
++                pthread_mutex_unlock(&mx_meas_dw);
++                break;
++            /* End */
+             case JIT_ERROR_COLLISION_PACKET:
+                 memcpy((void *)(buff_ack + buff_index), (void *)"\"COLLISION_PACKET\"", 18);
+                 buff_index += 18;
+@@ -2247,6 +2260,9 @@ void thread_down(void) {
+     int32_t field_latitude; /* 3 bytes, derived from reference latitude */
+     int32_t field_longitude; /* 3 bytes, derived from reference longitude */
+     uint16_t field_crc1, field_crc2;
++    /* Begin modify for sx1301 coutner wrap-up */
++    double txpk_tmst = 0;
++    /* End */
+ 
+     /* auto-quit variable */
+     uint32_t autoquit_cnt = 0; /* count the number of PULL_DATA sent since the latest PULL_ACK */
+@@ -2381,13 +2397,6 @@ void thread_down(void) {
+     jit_queue_init(&jit_queue);
+ 
+     while (!exit_sig && !quit_sig) {
+-        /* Begin add for feeddog */
+-        #if defined(ENABLE_WATCHDOG)
+-		if(thread_feeddog_periodically(PKTFWD_SYMBOL, THRD_ID_DOWN, 60, 180, &watchdog_time_keeper) < 0) {
+-			MSG("ERROR: [down] down thread feeddog failed\n");
+-		}
+-        #endif
+-        /* End */
+ 
+         /* auto-quit if the threshold is crossed */
+         if ((autoquit_threshold > 0) && (autoquit_cnt >= autoquit_threshold)) {
+@@ -2418,6 +2427,14 @@ void thread_down(void) {
+         recv_time = send_time;
+         while ((int)difftimespec(recv_time, send_time) < keepalive_time) {
+ 
++            /* Begin add for feeddog */
++            #if defined(ENABLE_WATCHDOG)
++            if(thread_feeddog_periodically(PKTFWD_SYMBOL, THRD_ID_DOWN, 60, 180, &watchdog_time_keeper) < 0) {
++                MSG("ERROR: [down] down thread feeddog failed\n");
++            }
++            #endif
++            /* End */
++
+             /* try to receive a datagram */
+             memset(buff_down, 0x0, sizeof(buff_down));
+             msg_len = recv(sock_down, (void *)buff_down, (sizeof buff_down)-1, 0);
+@@ -2585,11 +2602,13 @@ void thread_down(void) {
+ 
+                         /* display beacon payload */
+                         MSG("INFO: Beacon queued (count_us=%u, freq_hz=%u, size=%u):\n", beacon_pkt.count_us, beacon_pkt.freq_hz, beacon_pkt.size);
++                        #if 0
+                         printf( "   => " );
+                         for (i = 0; i < beacon_pkt.size; ++i) {
+                             printf("%02X ", beacon_pkt.payload[i]);
+                         }
+                         MSG("\n");
++                        #endif
+                     } else {
+                         MSG_DEBUG(DEBUG_BEACON, "--> beacon queuing failed with %d\n", jit_result);
+                         /* update stats */
+@@ -2737,7 +2756,14 @@ void thread_down(void) {
+                 val = json_object_get_value(txpk_obj,"tmst");
+                 if (val != NULL) {
+                     /* TX procedure: send on timestamp value */
+-                    txpkt.count_us = (uint32_t)json_value_get_number(val);
++                    /* Begin modify for sx1301 coutner wrap-up */
++                    txpk_tmst = (double)json_value_get_number(val);
++                    if (txpk_tmst >= TMST_COUNT_MAX) {
++                        txpk_tmst = txpk_tmst - TMST_COUNT_MAX;
++                        MSG("INFO: [down] sx1301 coutner wrap-up, adjust txpk tmst:%f\n", txpk_tmst);
++                    }
++                    txpkt.count_us = (uint32_t)txpk_tmst;
++                    /* End */
+ 
+                     /* Concentrator timestamp is given, we consider it is a Class A downlink */
+                     downlink_type = JIT_PKT_TYPE_DOWNLINK_CLASS_A;

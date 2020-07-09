@@ -1,0 +1,35 @@
+From 0e0380edbe01b4cb162c179860b23cdea33c2825 Mon Sep 17 00:00:00 2001
+Date: Tue, 31 Jul 2018 16:55:50 +0800
+Subject: [PATCH] fix sx1301 coutner wrap-up
+
+---
+ libloragw/src/loragw_gps.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/libloragw/src/loragw_gps.c b/libloragw/src/loragw_gps.c
+index c0e0ded..11381f9 100644
+--- a/libloragw/src/loragw_gps.c
++++ b/libloragw/src/loragw_gps.c
+@@ -795,7 +795,7 @@ int lgw_cnt2gps(struct tref ref, uint32_t count_us, struct timespec *gps_time) {
+     }
+ 
+     /* calculate delta in milliseconds between reference count_us and target count_us */
+-    delta_sec = (double)(count_us - ref.count_us) / (TS_CPS * ref.xtal_err);
++    delta_sec = (double)((double)count_us - (double)ref.count_us) / (TS_CPS * ref.xtal_err);
+ 
+     /* now add that delta to reference GPS time */
+     fractpart = modf (delta_sec , &intpart);
+@@ -823,8 +823,8 @@ int lgw_gps2cnt(struct tref ref, struct timespec gps_time, uint32_t *count_us) {
+     }
+ 
+     /* calculate delta in seconds between reference gps time and target gps time */
+-    delta_sec = (double)(gps_time.tv_sec - ref.gps.tv_sec);
+-    delta_sec += 1E-9 * (double)(gps_time.tv_nsec - ref.gps.tv_nsec);
++    delta_sec = (double)((double)gps_time.tv_sec - (double)ref.gps.tv_sec);
++    delta_sec += 1E-9 * (double)((double)gps_time.tv_nsec - (double)ref.gps.tv_nsec);    
+ 
+     /* now convert that to internal counter tics and add that to reference counter value */
+     *count_us = ref.count_us + (uint32_t)(delta_sec * TS_CPS * ref.xtal_err);
+-- 
+1.8.3.1
+

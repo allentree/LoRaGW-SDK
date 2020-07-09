@@ -1,0 +1,615 @@
+From b86039f2bb916254645343fbabcfb1c673f19a6c Mon Sep 17 00:00:00 2001
+Date: Thu, 29 Nov 2018 11:21:00 +0800
+Subject: [PATCH] add for watchdog and dbus ipc and monitor feature
+
+---
+ lora_pkt_fwd/Makefile                      |  51 +++++++++++-
+ lora_pkt_fwd/global_conf.json              |   2 +-
+ lora_pkt_fwd/inc/pktfwd_interface_export.h |  10 +++
+ lora_pkt_fwd/inc/pktfwd_ipc_local.h        |  19 +++++
+ lora_pkt_fwd/inc/trace.h                   |  19 ++++-
+ lora_pkt_fwd/src/lora_pkt_fwd.c            | 125 ++++++++++++++++++++++++++++-
+ lora_pkt_fwd/src/pktfwd_ipc_local.c        | 120 +++++++++++++++++++++++++++
+ lora_pkt_fwd/src/timersync.c               |  23 ++++++
+ 8 files changed, 360 insertions(+), 9 deletions(-)
+ create mode 100755 lora_pkt_fwd/inc/pktfwd_interface_export.h
+ create mode 100755 lora_pkt_fwd/inc/pktfwd_ipc_local.h
+ create mode 100755 lora_pkt_fwd/src/pktfwd_ipc_local.c
+ mode change 100644 => 100755 lora_pkt_fwd/src/timersync.c
+
+diff --git a/lora_pkt_fwd/Makefile b/lora_pkt_fwd/Makefile
+index 07370c6..5a5c608 100755
+--- a/lora_pkt_fwd/Makefile
++++ b/lora_pkt_fwd/Makefile
+@@ -1,13 +1,20 @@
+ ### Application-specific constants
+ 
+ APP_NAME := lora_pkt_fwd
+-
++ENABLE_WATCHDOG_SUPPORT=true
++ENABLE_ALILOG_SUPPORT=true
++ENABLE_MONITOR_SUPPORT=true
++ENABLE_ADVANCED_OTA_SUPPORT=true
+ ### Environment constants 
+ 
+ LGW_PATH ?= ../../lora_gateway/libloragw
+ ARCH ?=
+ CROSS_COMPILE ?=
+ 
++ENABLE_IPC1=
++ENABLE_IPC2=
++DBUS_IPC_LIBS=
++
+ OBJDIR = obj
+ INCLUDES = $(wildcard inc/*.h)
+ 
+@@ -19,7 +26,11 @@ RELEASE_VERSION := `cat ../VERSION`
+ 
+ ### Constant symbols
+ 
++ifeq ($(TOOLCHAIN_SYSROOT),)
+ CC := $(CROSS_COMPILE)gcc
++else
++CC := $(CROSS_COMPILE)gcc --sysroot=${TOOLCHAIN_SYSROOT}
++endif
+ AR := $(CROSS_COMPILE)ar
+ 
+ CFLAGS := -O2 -Wall -Wextra -std=c99 -Iinc -I.
+@@ -38,7 +49,39 @@ LGW_INC += $(LGW_PATH)/inc/loragw_gps.h
+ 
+ ### Linking options
+ 
+-LIBS := -lloragw -lrt -lpthread -lm
++LIBS = -L$(LGW_PATH) -lloragw -lrt -lpthread -lm 
++
++ifeq ($(BUILD_PKTFWD_BIN),true)
++SDK_LIB_PATH = ${BUILDROOT}/${BUILDOUTPUT}/lib/
++CFLAGS += -I${BUILDROOT}/${BUILDOUTPUT}/include/
++endif
++
++ifeq ($(ENABLE_WATCHDOG_SUPPORT),true)
++LIBS += -L$(SDK_LIB_PATH) -lwatchdog -L$(SDK_LIB_PATH) -lcjson -L$(SDK_LIB_PATH) -ldbus-1
++CFLAGS += -DENABLE_WATCHDOG
++endif
++
++ifeq ($(ENABLE_ALILOG_SUPPORT),true)
++LIBS += -L$(SDK_LIB_PATH) -lalilog 
++CFLAGS += -DENABLE_REMOTE_LOG
++endif
++
++ifeq ($(ENABLE_ADVANCED_OTA_SUPPORT),true)
++CFLAGS += -DENABLE_ADVANCED_OTA
++ENABLE_IPC2 = true
++endif
++
++ifeq ($(ENABLE_MONITOR_SUPPORT),true)
++CFLAGS += -DENABLE_MONITOR
++ENABLE_IPC2 = true
++endif
++
++ifneq ($(ENABLE_IPC1)$(ENABLE_IPC2),$(ENABLE_IPC_NULL))
++LIBS += $(BUILDROOT)/$(BUILDOUTPUT)/lib/libipcbus.a
++LIBS += -L$(SDK_LIB_PATH) -ldbus-1 -lexpat
++CFLAGS += -DENABLE_DBUS_IPC
++endif
++
+ 
+ ### General build targets
+ 
+@@ -61,7 +104,7 @@ $(OBJDIR)/%.o: src/%.c $(INCLUDES) | $(OBJDIR)
+ $(OBJDIR)/$(APP_NAME).o: src/$(APP_NAME).c $(LGW_INC) $(INCLUDES) | $(OBJDIR)
+ 	$(CC) -c $(CFLAGS) $(VFLAG) -I$(LGW_PATH)/inc $< -o $@
+ 
+-$(APP_NAME): $(OBJDIR)/$(APP_NAME).o $(LGW_PATH)/libloragw.a $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/aes.o $(OBJDIR)/cmac.o $(OBJDIR)/lora_timesync.o $(OBJDIR)/ntp_time.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o
+-	$(CC) -L$(LGW_PATH) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/aes.o $(OBJDIR)/cmac.o $(OBJDIR)/lora_timesync.o $(OBJDIR)/ntp_time.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o -o $@ $(LIBS)
++$(APP_NAME): $(OBJDIR)/$(APP_NAME).o $(LGW_PATH)/libloragw.a $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/aes.o $(OBJDIR)/cmac.o $(OBJDIR)/lora_timesync.o $(OBJDIR)/ntp_time.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o $(OBJDIR)/pktfwd_ipc_local.o
++	$(CC) $< $(OBJDIR)/parson.o $(OBJDIR)/base64.o $(OBJDIR)/jitqueue.o $(OBJDIR)/timersync.o $(OBJDIR)/aes.o $(OBJDIR)/cmac.o $(OBJDIR)/lora_timesync.o $(OBJDIR)/ntp_time.o $(OBJDIR)/sys_stat.o $(OBJDIR)/filter_node.o $(OBJDIR)/pktfwd_ipc_local.o $(LIBS) -o $@
+ 
+ ### EOF
+diff --git a/lora_pkt_fwd/global_conf.json b/lora_pkt_fwd/global_conf.json
+index 47481fa..4da1660 100755
+--- a/lora_pkt_fwd/global_conf.json
++++ b/lora_pkt_fwd/global_conf.json
+@@ -216,7 +216,7 @@
+         "serv_port_up": 8888,
+         "serv_port_down": 9999,
+         /* adjust the following parameters for your network */
+-        "keepalive_interval": 10,
++        "keepalive_interval": 86400,
+         "stat_interval": 60,
+         "push_timeout_ms": 100,
+         /* forward only valid packets */
+diff --git a/lora_pkt_fwd/inc/pktfwd_interface_export.h b/lora_pkt_fwd/inc/pktfwd_interface_export.h
+new file mode 100755
+index 0000000..c247cf6
+--- /dev/null
++++ b/lora_pkt_fwd/inc/pktfwd_interface_export.h
+@@ -0,0 +1,10 @@
++#ifndef _PKTFWD_INTERFACE_EXPORT_H_
++#define _PKTFWD_INTERFACE_EXPORT_H_
++
++
++#define PKTFWD_WELL_KNOWN_NAME "iot.gateway.pktfwd"
++#define PKTFWD_INTERFACE_NAME "iot.gateway.pktfwd"
++#define PKTFWD_OBJECT_NAME "/iot/gateway/pktfwd"
++
++
++#endif
+\ No newline at end of file
+diff --git a/lora_pkt_fwd/inc/pktfwd_ipc_local.h b/lora_pkt_fwd/inc/pktfwd_ipc_local.h
+new file mode 100755
+index 0000000..947200c
+--- /dev/null
++++ b/lora_pkt_fwd/inc/pktfwd_ipc_local.h
+@@ -0,0 +1,19 @@
++#ifndef _PKTFWD_IPC_LOCAL_H_
++#define _PKTFWD_IPC_LOCAL_H_
++
++#include <stdint.h>     /* C99 types */
++#ifdef ENABLE_DBUS_IPC
++int pktfwd_ipc_setup();
++int pktfwd_ipc_exit();
++
++#ifdef ENABLE_ADVANCED_OTA
++int pktfwd_report_update_checkout(int result, const char *msg);
++#endif
++
++#ifdef ENABLE_MONITOR
++int pktfwd_notify_monitor_alarms(int type, const char *msg);
++#endif
++
++#endif
++
++#endif
+\ No newline at end of file
+diff --git a/lora_pkt_fwd/inc/trace.h b/lora_pkt_fwd/inc/trace.h
+index f72e07c..02c2c3e 100755
+--- a/lora_pkt_fwd/inc/trace.h
++++ b/lora_pkt_fwd/inc/trace.h
+@@ -17,6 +17,12 @@ Maintainer: Michael Coracin
+ #ifndef _LORA_PKTFWD_TRACE_H
+ #define _LORA_PKTFWD_TRACE_H
+ 
++/* Begin add for remote log */
++#if defined(ENABLE_REMOTE_LOG)
++#include "log.h"
++#endif
++/* End */
++
+ #define DEBUG_PKT_FWD   0
+ #define DEBUG_JIT       0
+ #define DEBUG_JIT_ERROR 1
+@@ -24,14 +30,23 @@ Maintainer: Michael Coracin
+ #define DEBUG_BEACON    1
+ #define DEBUG_LOG       1
+ 
++/* Begin add for remote log */
++#if defined(ENABLE_REMOTE_LOG)
++#define MSG(args...) log_i(NULL, args)
++#define MSG_DEBUG(FLAG, fmt, ...)                                                                         \
++            do  {                                                                                         \
++                if (FLAG)                                                                                 \
++                    log_d(NULL, fmt, ##__VA_ARGS__);                                                      \
++            } while (0)
++#else
+ #define MSG(args...) printf(args) /* message that is destined to the user */
+ #define MSG_DEBUG(FLAG, fmt, ...)                                                                         \
+             do  {                                                                                         \
+                 if (FLAG)                                                                                 \
+                     fprintf(stdout, "%s:%d:%s(): " fmt, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__); \
+             } while (0)
+-
+-
++#endif
++/* End */
+ 
+ #endif
+ /* --- EOF ------------------------------------------------------------------ */
+diff --git a/lora_pkt_fwd/src/lora_pkt_fwd.c b/lora_pkt_fwd/src/lora_pkt_fwd.c
+index e753e57..1f12809 100755
+--- a/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -64,6 +64,18 @@ Maintainer: Michael Coracin
+ #include "filter_node.h"
+ /* End */
+ 
++/* Begin add for feeddog */
++#if defined(ENABLE_WATCHDOG)
++#include "watch_dog_export.h"
++#endif
++/* End */
++
++/* Begin add for dbus ipc */
++#ifdef ENABLE_DBUS_IPC
++#include "pktfwd_ipc_local.h"
++#endif
++/* End */
++
+ /* -------------------------------------------------------------------------- */
+ /* --- PRIVATE MACROS ------------------------------------------------------- */
+ 
+@@ -124,6 +136,15 @@ Maintainer: Michael Coracin
+ #define DEFAULT_BEACON_POWER        17
+ #define DEFAULT_BEACON_INFODESC     0
+ 
++/* Begin add for feeddog */
++#if defined(ENABLE_WATCHDOG)
++#define THRD_ID_MAIN            "thrd_main"
++#define THRD_ID_UP              "thrd_up"
++#define THRD_ID_DOWN            "thrd_down"
++#define THRD_ID_JIT             "thrd_jit"
++#endif
++/* End */
++
+ /* -------------------------------------------------------------------------- */
+ /* --- PRIVATE VARIABLES (GLOBAL) ------------------------------------------- */
+ 
+@@ -1131,6 +1152,19 @@ int main(void)
+     float mem_ratio = 0.0;
+     // End
+ 
++    /* Begin add for feeddog */
++    #if defined(ENABLE_WATCHDOG)
++	struct timespec watchdog_time_keeper;
++	clock_gettime(CLOCK_MONOTONIC, &watchdog_time_keeper);
++	#endif
++    /* End */
++
++    /* Begin add for remote log */
++    #if defined(ENABLE_REMOTE_LOG)
++    log_init("pktfwd", LOG_FILE, LOG_LEVEL_DEBUG, LOG_MOD_VERBOSE);
++    #endif
++    /* End */
++    
+     /* display version informations */
+     MSG("*** Beacon Packet Forwarder for Lora Gateway ***\nVersion: " VERSION_STRING "\n");
+     MSG("*** Lora concentrator HAL library version info ***\n%s\n***\n", lgw_version_info());
+@@ -1144,6 +1178,15 @@ int main(void)
+         MSG("INFO: Host endianness unknown\n");
+     #endif
+ 
++    /* Begin add for dbus ipc */
++    #ifdef ENABLE_DBUS_IPC
++    if (pktfwd_ipc_setup() < 0 ) {
++        MSG("failed to setup ipc bus!!!");
++        exit(EXIT_FAILURE);
++    }
++    #endif
++    /* End */
++
+     /* load configuration files */
+     if (access(debug_cfg_path, R_OK) == 0) { /* if there is a debug conf, parse only the debug conf */
+         MSG("INFO: found debug configuration file %s, parsing it\n", debug_cfg_path);
+@@ -1366,6 +1409,14 @@ int main(void)
+     while (!exit_sig && !quit_sig) {
+         /* wait for next reporting interval */
+         wait_ms(1000 * stat_interval);
++        
++        /* Begin add for feeddog */
++        #if defined(ENABLE_WATCHDOG)
++		if (thread_feeddog_periodically(PKTFWD_SYMBOL, THRD_ID_MAIN, 60, 180, &watchdog_time_keeper) < 0) {
++			MSG("ERROR: [main] main thread feeddog failed\n");
++		}
++        #endif
++        /* End */
+ 
+         /* get timestamp for statistics */
+         t = time(NULL);
+@@ -1595,6 +1646,18 @@ int main(void)
+     #endif
+     /* End */
+ 
++    /* Begin add for dbus ipc */
++    #ifdef ENABLE_DBUS_IPC
++    pktfwd_ipc_exit();
++    #endif
++    /* End */
++
++    /* Begin add for remote log */
++    #if defined(ENABLE_REMOTE_LOG)
++    log_destroy();
++    #endif
++    /* End */
++
+     /* Begin add for reset when no ack in specify time */
+     if (need_reset == true) {
+         sync();
+@@ -1653,6 +1716,13 @@ void thread_up(void) {
+     uint32_t mote_addr = 0;
+     uint16_t mote_fcnt = 0;
+ 
++    /* Begin add for feeddog */
++    #if defined(ENABLE_WATCHDOG)
++	struct timespec watchdog_time_keeper;
++	clock_gettime(CLOCK_MONOTONIC, &watchdog_time_keeper);
++	#endif
++    /* End */
++
+     /* set upstream socket RX timeout */
+     i = setsockopt(sock_up, SOL_SOCKET, SO_RCVTIMEO, (void *)&push_timeout_half, sizeof push_timeout_half);
+     if (i != 0) {
+@@ -1667,6 +1737,13 @@ void thread_up(void) {
+     *(uint32_t *)(buff_up + 8) = net_mac_l;
+ 
+     while (!exit_sig && !quit_sig) {
++        /* Begin add for feeddog */
++        #if defined(ENABLE_WATCHDOG)
++		if(thread_feeddog_periodically(PKTFWD_SYMBOL, THRD_ID_UP, 60, 180, &watchdog_time_keeper) < 0) {
++			MSG("ERROR: [up] up thread feeddog failed\n");
++		}
++        #endif
++        /* End */
+ 
+         /* fetch packets */
+         pthread_mutex_lock(&mx_concent);
+@@ -2171,6 +2248,13 @@ void thread_down(void) {
+     enum jit_error_e jit_result = JIT_ERROR_OK;
+     enum jit_pkt_type_e downlink_type;
+ 
++    /* Begin add for feeddog */
++    #if defined(ENABLE_WATCHDOG)
++	struct timespec watchdog_time_keeper;
++	clock_gettime(CLOCK_MONOTONIC, &watchdog_time_keeper);
++	#endif
++    /* End */
++
+     /* set downstream socket RX timeout */
+     i = setsockopt(sock_down, SOL_SOCKET, SO_RCVTIMEO, (void *)&pull_timeout, sizeof pull_timeout);
+     if (i != 0) {
+@@ -2213,8 +2297,8 @@ void thread_down(void) {
+             break;
+         case 9:
+             beacon_pkt.datarate = DR_LORA_SF9;
+-            beacon_RFU1_size = 3;
+-            beacon_RFU2_size = 1;
++            beacon_RFU1_size = 2;
++            beacon_RFU2_size = 0;
+             break;
+         case 10:
+             beacon_pkt.datarate = DR_LORA_SF10;
+@@ -2288,6 +2372,13 @@ void thread_down(void) {
+     jit_queue_init(&jit_queue);
+ 
+     while (!exit_sig && !quit_sig) {
++        /* Begin add for feeddog */
++        #if defined(ENABLE_WATCHDOG)
++		if(thread_feeddog_periodically(PKTFWD_SYMBOL, THRD_ID_DOWN, 60, 180, &watchdog_time_keeper) < 0) {
++			MSG("ERROR: [down] down thread feeddog failed\n");
++		}
++        #endif
++        /* End */
+ 
+         /* auto-quit if the threshold is crossed */
+         if ((autoquit_threshold > 0) && (autoquit_cnt >= autoquit_threshold)) {
+@@ -2518,10 +2609,26 @@ void thread_down(void) {
+ 
+             /* Begin add for reset when no ack in specify time */
+             pthread_mutex_lock(&mx_stat_no_ack);
++            /* Begin add for advanced OTA */
++            #if defined(ENABLE_ADVANCED_OTA)
++            int package_up_down_ok = 0;
++            if (stat_no_ack_cnt > 0) {
++                package_up_down_ok = 1;
++            }
++            #endif
++            /* End */
+             stat_no_ack_cnt = 0;
+             pthread_mutex_unlock(&mx_stat_no_ack);
+             /* End */
+ 
++            /* Begin add for advanced OTA */
++            #if defined(ENABLE_ADVANCED_OTA)
++            if (package_up_down_ok) {
++                pktfwd_report_update_checkout(0, "both of the uplink and downlink is OK");
++            }
++            #endif
++            /* End */
++
+             /* Begin add for packet filtering by whitelist and blacklist */
+             #if defined(USE_FILTER_NODE)
+             if (1 == filter_inited) {
+@@ -2965,10 +3072,24 @@ void thread_jit(void) {
+     enum jit_error_e jit_result;
+     enum jit_pkt_type_e pkt_type;
+     uint8_t tx_status;
++    /* Begin add for feeddog */
++    #if defined(ENABLE_WATCHDOG)
++	struct timespec watchdog_time_keeper;
++	clock_gettime(CLOCK_MONOTONIC, &watchdog_time_keeper);
++	#endif
++    /* End */
+ 
+     while (!exit_sig && !quit_sig) {
+         wait_ms(10);
+ 
++        /* Begin add for feeddog */
++        #if defined(ENABLE_WATCHDOG)
++		if(thread_feeddog_periodically(PKTFWD_SYMBOL, THRD_ID_JIT, 60, 180, &watchdog_time_keeper) < 0) {
++			MSG("ERROR: [jit] jit thread feeddog failed\n");
++		}
++        #endif
++        /* End */
++
+         /* transfer data and metadata to the concentrator, and schedule TX */
+         gettimeofday(&current_unix_time, NULL);
+         get_concentrator_time(&current_concentrator_time, current_unix_time);
+diff --git a/lora_pkt_fwd/src/pktfwd_ipc_local.c b/lora_pkt_fwd/src/pktfwd_ipc_local.c
+new file mode 100755
+index 0000000..0d52b30
+--- /dev/null
++++ b/lora_pkt_fwd/src/pktfwd_ipc_local.c
+@@ -0,0 +1,120 @@
++#include "pktfwd_ipc_local.h"
++#ifdef ENABLE_DBUS_IPC
++#include "loragw_interface_common.h"
++#if defined(ENABLE_ADVANCED_OTA)
++#include "update_interface_export.h"
++#endif
++#if defined(ENABLE_MONITOR)
++#include "monitor_interface_export.h"
++#endif
++#include "pktfwd_interface_export.h"
++
++/*
++dbus_message_callback_st call_config[] = {
++
++};
++*/
++
++int pktfwd_ipc_setup()
++{
++    int ret = -1;
++    dbus_params_st dbus_config = {
++        PKTFWD_WELL_KNOWN_NAME,
++        PKTFWD_OBJECT_NAME,
++        PKTFWD_INTERFACE_NAME,
++    };
++    ret = loragw_ipc_setup(&dbus_config);
++    if(ret < 0) {
++        //MSG("loragw ipc setup failed!!!\n");
++        return ret;
++    }
++    #if 0
++    int count = sizeof(call_config)/sizeof(call_config[0]);
++    int i = 0;
++
++    for(i = 0 ; i < count ; i++) {
++        ret = loragw_ipc_setup_msg_callback(call_config[i].name, call_config[i].call );
++        if(ret < 0) {
++            log_err("register %s 's callback failed , ret code %d!!", call_config[i].name, ret);
++            break;
++        }
++    }
++    
++    if(ret < 0) {
++        loragw_ipc_exit();
++    }
++    #endif
++    return ret;
++}
++
++int pktfwd_ipc_exit()
++{
++    return loragw_ipc_exit();
++}
++
++#if defined(ENABLE_ADVANCED_OTA)
++int pktfwd_report_update_checkout(int result, const char *msg)
++{
++    static int notified = 0;
++    const char * state = NULL;
++    const char * module = NULL;
++    if(!msg )
++        return LORA_IPC_ERROR_INVALID_PARAM;
++
++    if(notified > 10) {
++        return LORA_IPC_SUCCESS;
++    }
++    DBusMessage *message = dbus_message_new_signal(PKTFWD_OBJECT_NAME, PKTFWD_INTERFACE_NAME,
++                                  SIGNAL_UPDATE_CHECKOUT);
++    if(!message) {
++        return LORA_IPC_ERROR_NO_MEM;
++    }
++    dbus_message_set_destination(message, UPDATE_WELL_KNOWN_NAME);
++    if(result < 0) {
++        state = FAILED_WORD;
++    }
++    else {
++        state = SUCCESS_WORD;
++    }
++    module = "pktfwd";
++    dbus_message_append_args(message, DBUS_TYPE_STRING, &state, DBUS_TYPE_STRING,
++                             &module, DBUS_TYPE_STRING,
++                             &msg, DBUS_TYPE_INVALID);
++
++    if (FALSE == loragw_ipc_send((void *)message, NULL)) {
++        dbus_message_unref(message);
++        return LORA_IPC_ERROR_IO;
++    }
++    dbus_message_unref(message);
++    notified ++;
++    return LORA_IPC_SUCCESS;
++}
++#endif
++
++#if defined(ENABLE_MONITOR)
++int pktfwd_notify_monitor_alarms(int type, const char *pmsg)
++{
++    mon_alarm_type_t msg_type = (mon_alarm_type_t)type;
++    if(msg_type > MON_ALARM_REBOOT || !pmsg) {
++
++        return LORA_IPC_ERROR_INVALID_PARAM;
++    }
++    DBusMessage *message = dbus_message_new_signal(PKTFWD_OBJECT_NAME, PKTFWD_INTERFACE_NAME,
++                                  MON_ALARM_SIGNAL);
++    if(!message) {
++        return LORA_IPC_ERROR_NO_MEM;
++    }
++    dbus_message_set_destination(message, MONITOR_WELL_KNOWN_NAME);
++
++    dbus_message_append_args(message,DBUS_TYPE_UINT32, &msg_type, DBUS_TYPE_STRING, &pmsg, DBUS_TYPE_INVALID);
++
++    if (FALSE == loragw_ipc_send((void *) message, NULL)) {
++        dbus_message_unref(message);
++        return LORA_IPC_ERROR_IO;
++    }
++    dbus_message_unref(message);
++    return LORA_IPC_SUCCESS;
++}
++#endif
++
++#endif
+\ No newline at end of file
+diff --git a/lora_pkt_fwd/src/timersync.c b/lora_pkt_fwd/src/timersync.c
+old mode 100644
+new mode 100755
+index 3dd919b..3f877ed
+--- a/lora_pkt_fwd/src/timersync.c
++++ b/lora_pkt_fwd/src/timersync.c
+@@ -27,6 +27,13 @@ Maintainer: Michael Coracin
+ #include "loragw_reg.h"
+ #include "loragw_aux.h"
+ 
++/* Begin add for monitor 1301 status */
++#if defined(ENABLE_MONITOR)
++#include "monitor_interface_export.h"
++#include "pktfwd_ipc_local.h"
++#endif
++/* End */
++
+ /* -------------------------------------------------------------------------- */
+ /* --- PRIVATE CONSTANTS & TYPES -------------------------------------------- */
+ 
+@@ -84,6 +91,12 @@ int get_concentrator_time(struct timeval *concent_time, struct timeval unix_time
+ /* ---------------------------------------------------------------------------------------------- */
+ /* --- THREAD 6: REGULARLAY MONITOR THE OFFSET BETWEEN UNIX CLOCK AND CONCENTRATOR CLOCK -------- */
+ 
++/* Begin add for monitor 1301 status */
++#if defined(ENABLE_MONITOR)
++static uint32_t g_sx1301_timecount_pre = 0;
++#endif
++/* End */
++
+ void thread_timersync(void) {
+     struct timeval unix_timeval;
+     struct timeval concentrator_timeval;
+@@ -106,6 +119,16 @@ void thread_timersync(void) {
+         pthread_mutex_lock(&mx_concent);
+         lgw_get_trigcnt(&sx1301_timecount);
+         pthread_mutex_unlock(&mx_concent);
++        
++        /* Begin add for monitor 1301 status */
++        #if defined(ENABLE_MONITOR)
++        if (sx1301_timecount == g_sx1301_timecount_pre) {
++            pktfwd_notify_monitor_alarms(MON_ALARM_SX1301, "count inconsistent");
++        }
++        g_sx1301_timecount_pre = sx1301_timecount;
++        #endif
++        /* End */
++
+         concentrator_timeval.tv_sec = sx1301_timecount / 1000000UL;
+         concentrator_timeval.tv_usec = sx1301_timecount - (concentrator_timeval.tv_sec * 1000000UL);
+ 
+-- 
+1.8.3.1
+

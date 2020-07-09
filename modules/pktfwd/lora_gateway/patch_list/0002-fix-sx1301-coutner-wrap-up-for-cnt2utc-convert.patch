@@ -1,0 +1,35 @@
+From 809237515972be63634ebd1d99df7ef59be64642 Mon Sep 17 00:00:00 2001
+Date: Wed, 8 May 2019 16:00:28 +0800
+Subject: [PATCH] fix sx1301 coutner wrap-up for cnt2utc convert
+
+---
+ modules/pktfwd/lora_gateway/libloragw/src/loragw_gps.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/modules/pktfwd/lora_gateway/libloragw/src/loragw_gps.c b/modules/pktfwd/lora_gateway/libloragw/src/loragw_gps.c
+index 11381f9..1d7c0d7 100755
+--- a/modules/pktfwd/lora_gateway/libloragw/src/loragw_gps.c
++++ b/modules/pktfwd/lora_gateway/libloragw/src/loragw_gps.c
+@@ -744,7 +744,7 @@ int lgw_cnt2utc(struct tref ref, uint32_t count_us, struct timespec *utc) {
+     }
+ 
+     /* calculate delta in seconds between reference count_us and target count_us */
+-    delta_sec = (double)(count_us - ref.count_us) / (TS_CPS * ref.xtal_err);
++    delta_sec = (double)((double)count_us - (double)ref.count_us) / (TS_CPS * ref.xtal_err);
+ 
+     /* now add that delta to reference UTC time */
+     fractpart = modf (delta_sec , &intpart);
+@@ -772,8 +772,8 @@ int lgw_utc2cnt(struct tref ref, struct timespec utc, uint32_t *count_us) {
+     }
+ 
+     /* calculate delta in seconds between reference utc and target utc */
+-    delta_sec = (double)(utc.tv_sec - ref.utc.tv_sec);
+-    delta_sec += 1E-9 * (double)(utc.tv_nsec - ref.utc.tv_nsec);
++    delta_sec = (double)((double)utc.tv_sec - (double)ref.utc.tv_sec);
++    delta_sec += 1E-9 * (double)((double)utc.tv_nsec - (double)ref.utc.tv_nsec);
+ 
+     /* now convert that to internal counter tics and add that to reference counter value */
+     *count_us = ref.count_us + (uint32_t)(delta_sec * TS_CPS * ref.xtal_err);
+-- 
+1.8.3.1
+

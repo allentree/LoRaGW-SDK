@@ -1,0 +1,37 @@
+#!/bin/bash
+
+#set up vendor platform toolchain's path and host
+export PATH=$(pwd)/toolchain/gcc-linaro-arm-linux-gnueabihf-4.9-2014.09_linux/bin:$PATH
+export BUILDHOST=arm-linux-gnueabihf
+
+#setup cpu arch
+export board_arch=armv7a
+#export board_arch=mips
+#export board_arch=mipsel
+#export board_arch=armv8
+
+#set up build dir, general vendor no need modify
+export BUILDROOT=$(pwd)
+export BUILDTMP=tmp
+export BUILDOUT=out
+export BUILDOUTPUT=build
+export dbus_address="unix:path=/tmp/var/run/mbusd/mbusd_socket"
+
+#set up enable or disable use libalilog feature
+export ENABLE_ALILOG=true
+
+#set up enable or disable watchdog feature
+export ENABLE_WATCHDOG=true
+
+#set up enable or disable monitor feature
+export ENABLE_MONITOR=true
+
+#set up advanced ota module
+export ENABLE_ADVANCED_OTA=true
+
+#set up advanced security module
+export ENABLE_ADVANCED_SECURITY=true
+
+#set up build pktfwd module
+export BUILD_PKTFWD_BIN=true
+

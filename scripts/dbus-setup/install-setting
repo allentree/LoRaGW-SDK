@@ -1,0 +1,13 @@
+#!/bin/bash
+export mbusd_socket_dir=/tmp/var/run/mbusd
+export CONFIG_MBUS_TMP_PATH=${mbusd_socket_dir}
+#must be the same with the watchdog include file's setting
+export CONFIG_MBUS_UNIX_PATH=${mbusd_socket_dir}/mbusd_socket
+export CONFIG_MBUS_PID_FILE=${mbusd_socket_dir}/mbusd.pid
+#set the user's bin directory
+export CONFIG_MBUS_SERVICE_BIN_DIR=/home/lora/release/test
+export CONFIG_MBUS_SERVICE_DIR=${mbusd_socket_dir}/service
+export OUTPUT_DIR=${BUILDROOT}/${BUILDOUTPUT}
+export DBUS_SERVICE_ENABLE=false
+export service_dir=/lib/service
+export bindir=/bin

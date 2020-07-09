@@ -1,0 +1,145 @@
+From 6159ddf318821b4b6816e3dbffd43e4210a86f63 Mon Sep 17 00:00:00 2001
+Date: Wed, 27 Mar 2019 13:47:07 +0800
+Subject: [PATCH] add for support filter the no LoRaWAN rxpk and use default
+ power when txpk power invalid
+
+---
+ .../lora_pkt_fwd/src/filter_node.c                 | 60 +++++++++++++++++++++-
+ .../lora_pkt_fwd/src/lora_pkt_fwd.c                | 22 ++++++--
+ 2 files changed, 76 insertions(+), 6 deletions(-)
+
+diff --git a/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/filter_node.c b/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/filter_node.c
+index 4354922..e3c375f 100755
+--- a/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/filter_node.c
++++ b/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/filter_node.c
+@@ -1781,7 +1781,7 @@ int filter_up_proc(const uint8_t *payload, uint16_t size) {
+         return pass;
+     }
+ 
+-    mtype = payload[0];
++    mtype = payload[0] & 0xE0;
+     if ((0x00 == mtype) && (size > 16)) {
+         deveui_l  = payload[9];
+         deveui_l |= payload[10] << 8;
+@@ -1822,6 +1822,64 @@ int filter_up_proc(const uint8_t *payload, uint16_t size) {
+         } else {
+             MSG("INFO: [filter] devaddr: %X discard by white list filter\n", devaddr);
+         }
++    } else if ((0xC0 == mtype) && (size > 1)) {
++        uint8_t rejointype = 0xFF;
++        int needcheck = 1;
++
++        rejointype = payload[1];
++        if (((0x00 == rejointype) || (0x02 == rejointype)) && (size > 12)) {
++            deveui_l  = payload[5];
++            deveui_l |= payload[6] << 8;
++            deveui_l |= payload[7] << 16;
++            deveui_l |= payload[8] << 24;
++
++            deveui_h  = payload[9];
++            deveui_h |= payload[10] << 8;
++            deveui_h |= payload[11] << 16;
++            deveui_h |= payload[12] << 24;
++        } else if ((0x01 == rejointype) && (size > 17)) {
++            deveui_l  = payload[10];
++            deveui_l |= payload[11] << 8;
++            deveui_l |= payload[12] << 16;
++            deveui_l |= payload[13] << 24;
++
++            deveui_h  = payload[14];
++            deveui_h |= payload[15] << 8;
++            deveui_h |= payload[16] << 16;
++            deveui_h |= payload[17] << 24;
++        } else {
++            needcheck = 0;
++        }
++        if (needcheck == 1) {
++            deveui = ((uint64_t)deveui_h << 32) + deveui_l;
++            pass = filter_white_list_join(deveui);
++            if (1 == pass) {
++                pass = filter_black_list_join(deveui);
++                if (1 != pass) {
++                    MSG("INFO: [filter] deveui: %llX discard by black list filter\n", deveui);
++                } else {
++                    gettimeofday(&cur_unix_time, NULL);
++                    time_us = (uint64_t)cur_unix_time.tv_sec * 1000000UL + cur_unix_time.tv_usec;
++                    join_list_add_node(&join_list, time_us, deveui);
++                }
++            } else {
++                MSG("INFO: [filter] deveui: %llX discard by white list filter\n", deveui);
++            }
++        } else {
++            MSG("INFO: [filter] invalid rejoin-request packet(mtype:0x%02X size:%u), discard\n", mtype, size);
++            pass = 0;
++        }
++    } else if (0xE0 == mtype) {
++        if ((payload[0] == 0xE4) && (size == 19)) {
++            MSG("INFO: [filter] this is lora time sync packet, pass\n");
++            pass = 1;
++        } else {
++            MSG("INFO: [filter] invalid proprietary packet(mtype:0x%02X size:%u), discard\n", mtype, size);
++            pass = 0;
++        }
++    } else {
++        MSG("INFO: [filter] invalid packet(mtype:0x%02X size:%u), discard\n", mtype, size);
++        pass = 0;
+     }
+ 
+     return pass;
+diff --git a/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c b/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c
+index a83760a..03c050e 100755
+--- a/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/modules/pktfwd/packet_forwarder/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -136,6 +136,10 @@ Maintainer: Michael Coracin
+ #define DEFAULT_BEACON_POWER        17
+ #define DEFAULT_BEACON_INFODESC     0
+ 
++/* Begin add for set the default power when txpk power is invaild */
++#define DEFAULT_TX_POWER     17
++/* End */
++
+ /* Begin add for feeddog */
+ #if defined(ENABLE_WATCHDOG)
+ #define THRD_ID_MAIN            "thrd_main"
+@@ -1850,8 +1854,6 @@ void thread_up(void) {
+                     continue; /* skip that packet */
+                     // exit(EXIT_FAILURE);
+             }
+-            meas_up_pkt_fwd += 1;
+-            meas_up_payload_byte += p->size;
+             pthread_mutex_unlock(&mx_meas_up);
+ 
+             /* Begin add for packet filtering by whitelist and blacklist */
+@@ -1865,7 +1867,14 @@ void thread_up(void) {
+             }
+             #endif
+             /* End */
+-            
++
++            /* Begin add for count number of radio packet forwarded to the server */
++            pthread_mutex_lock(&mx_meas_up);
++            meas_up_pkt_fwd += 1;
++            meas_up_payload_byte += p->size;
++            pthread_mutex_unlock(&mx_meas_up);
++            /* End */
++
+             /* Start of packet, add inter-packet separator if necessary */
+             if (pkt_in_dgram == 0) {
+                 buff_up[buff_index] = '{';
+@@ -3014,8 +3023,11 @@ void thread_down(void) {
+                 }
+                 if (i == txlut.size) {
+                     /* this RF power is not supported */
+-                    jit_result = JIT_ERROR_TX_POWER;
+-                    MSG("ERROR: Packet REJECTED, unsupported RF power for TX - %d\n", txpkt.rf_power);
++                    /* Begin add for set the default power when txpk power is invaild */
++                    // jit_result = JIT_ERROR_TX_POWER;
++                    MSG("unsupported RF power for TX - %d, use default - %d\n", txpkt.rf_power, DEFAULT_TX_POWER);
++                    txpkt.rf_power = DEFAULT_TX_POWER;
++                    /* End */
+                 }
+             }
+ 
+-- 
+1.8.3.1
+

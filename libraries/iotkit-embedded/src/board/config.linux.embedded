@@ -1,0 +1,14 @@
+CONFIG_ENV_CFLAGS += \
+    -Os -Wall \
+    -D_PLATFORM_IS_LINUX_ \
+    -DATHOST_MQTT_REPORT_DISBALED
+
+ifeq ($(FEATURE_REMOTE_LOG_ENABLED),y)
+    CONFIG_ENV_CFLAGS  += -DENABLE_REMOTE_LOG
+endif
+
+OVERRIDE_CC = "${PLATFORM_CC}"
+OVERRIDE_AR = "${PLATFORM_AR}"
+
+CONFIG_examples                 :=
+CONFIG_tests                    :=

@@ -1,0 +1,119 @@
+From 442808bb4229281d57f8371f21f975df3a036bce Mon Sep 17 00:00:00 2001
+Date: Tue, 17 Apr 2018 14:42:01 +0800
+Subject: [PATCH 4/7] add for reset when stat packet no ack in specify timeout
+
+---
+ lora_pkt_fwd/src/lora_pkt_fwd.c | 55 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 55 insertions(+)
+
+diff --git a/lora_pkt_fwd/src/lora_pkt_fwd.c b/lora_pkt_fwd/src/lora_pkt_fwd.c
+index 2639876..621e2c5 100755
+--- a/lora_pkt_fwd/src/lora_pkt_fwd.c
++++ b/lora_pkt_fwd/src/lora_pkt_fwd.c
+@@ -200,6 +200,14 @@ static uint32_t meas_nb_beacon_queued = 0; /* count beacon inserted in jit queue
+ static uint32_t meas_nb_beacon_sent = 0; /* count beacon actually sent to concentrator */
+ static uint32_t meas_nb_beacon_rejected = 0; /* count beacon rejected for queuing */
+ 
++/* Begin add for reset when no ack in specify time */
++/* default count timeout of status packets had send but no ackstatus packets */ 
++#define DEFAULT_STAT_NO_ACK_TIMEOUT     60
++static pthread_mutex_t mx_stat_no_ack = PTHREAD_MUTEX_INITIALIZER;
++static uint32_t stat_no_ack_timeout = DEFAULT_STAT_NO_ACK_TIMEOUT;
++static uint32_t stat_no_ack_cnt = 0;
++/* End */
++
+ static pthread_mutex_t mx_meas_gps = PTHREAD_MUTEX_INITIALIZER; /* control access to the GPS statistics */
+ static bool gps_coord_valid; /* could we get valid GPS coordinates ? */
+ static struct coord_s meas_gps_coord; /* GPS position of the gateway */
+@@ -733,6 +741,15 @@ static int parse_gateway_configuration(const char * conf_file) {
+         MSG("INFO: statistics display interval is configured to %u seconds\n", stat_interval);
+     }
+ 
++    /* Begin add for reset when no ack in specify time */
++    /* get count timeout of status packets had send but no ack */
++    val = json_object_get_value(conf_obj, "stat_no_ack_timeout_cnt");
++    if (val != NULL) {
++        stat_no_ack_timeout = (unsigned)json_value_get_number(val);
++        MSG("INFO: timeout of status packets had send but no ack is configured to %u count\n", stat_no_ack_timeout);
++    }
++    /* End */
++
+     /* get time-out value (in ms) for upstream datagrams (optional) */
+     val = json_object_get_value(conf_obj, "push_timeout_ms");
+     if (val != NULL) {
+@@ -1036,6 +1053,10 @@ int main(void)
+     uint32_t cp_nb_beacon_queued = 0;
+     uint32_t cp_nb_beacon_sent = 0;
+     uint32_t cp_nb_beacon_rejected = 0;
++    /* Begin add for reset when no ack in specify time */
++    uint32_t cp_stat_no_ack_cnt = 0;
++    bool need_reset = false;
++    /* End */
+ 
+     /* GPS coordinates variables */
+     bool coord_ok = false;
+@@ -1438,6 +1459,18 @@ int main(void)
+         // End
+         report_ready = true;
+         pthread_mutex_unlock(&mx_stat_rep);
++
++        /* Begin add for reset when no ack in specify time */
++        pthread_mutex_lock(&mx_stat_no_ack);
++        cp_stat_no_ack_cnt = stat_no_ack_cnt;
++        pthread_mutex_unlock(&mx_stat_no_ack);
++        if (cp_stat_no_ack_cnt > stat_no_ack_timeout) {
++            exit_sig = true;
++            need_reset = true;
++            MSG("INFO: status pkt no ack count:%u up to timeout:%u\n", cp_stat_no_ack_cnt, stat_no_ack_timeout);
++        }
++        /* End */
++
+     }
+ 
+     /* wait for upstream thread to finish (1 fetch cycle max) */
+@@ -1471,6 +1504,15 @@ int main(void)
+         }
+     }
+ 
++    /* Begin add for reset when no ack in specify time */
++    if (need_reset == true) {
++        sync();
++        MSG("INFO: no ack in specify time, need reset now\n");
++        wait_ms(1000 * 5);
++        system("reboot");
++    }
++    /* End */
++
+     MSG("INFO: Exiting packet forwarder program\n");
+     exit(EXIT_SUCCESS);
+ }
+@@ -1873,6 +1915,13 @@ void thread_up(void) {
+                 MSG("ERROR: [up] snprintf failed line %u\n", (__LINE__ - 5));
+                 exit(EXIT_FAILURE);
+             }
++
++            /* Begin add for reset when no ack in specify time */
++            pthread_mutex_lock(&mx_stat_no_ack);
++            stat_no_ack_cnt++;
++            pthread_mutex_unlock(&mx_stat_no_ack);
++            MSG("INFO: [up] status pkt no ack count: %u\n", stat_no_ack_cnt);
++            /* End */
+         }
+ 
+         /* end of JSON datagram payload */
+@@ -2298,6 +2347,12 @@ void thread_down(void) {
+                 continue;
+             }
+ 
++            /* Begin add for reset when no ack in specify time */
++            pthread_mutex_lock(&mx_stat_no_ack);
++            stat_no_ack_cnt = 0;
++            pthread_mutex_unlock(&mx_stat_no_ack);
++            /* End */
++
+             /* if the datagram does not respect protocol, just ignore it */
+             //Begin add for adapt iot lora sdk
+             if ((msg_len < 4) || (buff_down[0] != PROTOCOL_VERSION) || ((buff_down[3] != PKT_PULL_RESP) && (buff_down[3] != PKT_PULL_ACK) && (buff_down[3] != PKT_PUSH_ACK))) {
+-- 
+1.8.3.1
+

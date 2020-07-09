@@ -1,0 +1,23 @@
+{
+    "whitelist": {
+        "enable": 1,
+        "binding": 0,
+        "ouis":[
+            { "oui": "D896E0", "enable": 1 }
+        ],
+        "netids":[
+            { "netid": 51, "enable": 1 },
+            { "netid": 0,  "enable": 1 },
+            { "netid": 1,  "enable": 1 }
+        ]
+    },
+
+    "filter_conf": {
+        "bl_enable": 1,
+        "bl_duration": 1800,
+        "join_period": 1800,
+        "join_interval": 6,
+        "join_count1": 5,
+        "join_count2": 20
+    }
+}
